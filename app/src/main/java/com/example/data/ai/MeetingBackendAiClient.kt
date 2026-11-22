@@ -211,8 +211,12 @@ class MeetingBackendAiClient(
                 val details = errObj?.optJSONObject("details")
                 val detailCode = details?.optString("code")?.takeIf { it.isNotBlank() }
                     ?: if (status == "AUDIO_INPUT_UNSUPPORTED" || status == "AUDIO_TRANSCRIPTION_INVALID_OUTPUT") status else null
-                val message = errObj?.optString("message")?.takeIf { it.isNotBlank() }
-                    ?: friendlyHttpError(response.code, endpoint)
+                val message = if (response.code == 404 && (status == "NOT_FOUND" || status == "HTTP_404")) {
+                    friendlyHttpError(response.code, endpoint)
+                } else {
+                    errObj?.optString("message")?.takeIf { it.isNotBlank() }
+                        ?: friendlyHttpError(response.code, endpoint)
+                }
                 return Result.failure(BackendAiException(status, detailCode, message))
             }
             val resultObj = json?.optJSONObject("result")

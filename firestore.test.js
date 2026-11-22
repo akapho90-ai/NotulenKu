@@ -224,26 +224,31 @@ test("Member cannot modify tenant settings or write taskConfigs; Owner/Admin can
       })
   );
 
-  await assertSucceeds(
-    aliceDb
-      .collection("tenants")
-      .doc(TENANT_A)
-      .collection("taskConfigs")
-      .doc("meeting_summary")
-      .set({
-        tenantId: TENANT_A,
-        task: "meeting_summary",
-        providerLabel: "SumoPod AI",
-        modelId: "glm-5.3-flash",
-        temperature: 0.2,
-        maxOutputTokens: 4096,
-        enabled: true,
-        systemPromptOverride: "",
-        memberUids: [ALICE_UID, BOB_UID],
-        createdAt: now,
-        updatedAt: now,
-      })
-  );
+  for (const [task, modelId] of [
+    ["meeting_summary", "glm-5.3-flash"],
+    ["periodic_summary", "claude-haiku-5-5"],
+  ]) {
+    await assertSucceeds(
+      aliceDb
+        .collection("tenants")
+        .doc(TENANT_A)
+        .collection("taskConfigs")
+        .doc(task)
+        .set({
+          tenantId: TENANT_A,
+          task,
+          providerLabel: "SumoPod AI",
+          modelId,
+          temperature: 0.2,
+          maxOutputTokens: 4096,
+          enabled: true,
+          systemPromptOverride: "",
+          memberUids: [ALICE_UID, BOB_UID],
+          createdAt: now,
+          updatedAt: now,
+        })
+    );
+  }
 });
 
 test("Rejects @DocumentId 'id' inside meeting write payload and future timestamps", async () => {

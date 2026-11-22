@@ -22,8 +22,11 @@ import javax.crypto.spec.GCMParameterSpec
  * Local device-encrypted store for custom AI and STT provider connections.
  * API keys are encrypted with Android Keystore AES/GCM and never written to Firestore, URLs, or logs.
  */
-class ConnectionVaultStore(context: Context) {
-    private val prefs = context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+class ConnectionVaultStore(context: Context, userId: String) {
+    private val prefs = context.applicationContext.getSharedPreferences(
+        "$PREFS_NAME.$userId",
+        Context.MODE_PRIVATE
+    )
     private val _connections = MutableStateFlow(loadAllConnections())
     val connections: StateFlow<List<AiConnection>> = _connections.asStateFlow()
 
@@ -115,6 +118,29 @@ class ConnectionVaultStore(context: Context) {
 
     fun getConnection(connectionId: String): AiConnection? =
         _connections.value.firstOrNull { it.id == connectionId }
+
+    private val _preferredConnections = MutableStateFlow(
+        listOf("ai", "stt").mapNotNull { kind ->
+            prefs.getString("preferred_$kind", null)?.let { kind to it }
+        }.toMap()
+    )
+    val preferredConnections: StateFlow<Map<String, String>> = _preferredConnections.asStateFlow()
+
+    fun preferredConnection(kind: String): AiConnection? =
+        _preferredConnections.value[kind]?.let(::getConnection)?.takeIf {
+            it.kind == kind && it.enabled && !it.isBuiltIn
+        }
+
+    fun selectPersonalConnection(connection: AiConnection) {
+        val kind = connection.kind
+        val id = connection.id.takeUnless { connection.isBuiltIn }
+        prefs.edit().putString("preferred_$kind", id).apply()
+        _preferredConnections.value = if (id == null) {
+            _preferredConnections.value - kind
+        } else {
+            _preferredConnections.value + (kind to id)
+        }
+    }
 
     private fun loadAllConnections(): List<AiConnection> {
         val custom = loadCustomConnections()

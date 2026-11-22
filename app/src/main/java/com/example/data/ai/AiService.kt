@@ -108,7 +108,16 @@ open class AiService(
             conn.providerType == "sumopod_backend" ||
             conn.providerType == "sumopod_backend_stt"
 
-    private fun resolveRouteTargets(config: TaskConfig?, kind: String): List<Pair<AiConnection, String>> {
+    private fun resolveRouteTargets(
+        config: TaskConfig?,
+        kind: String,
+        usePersonalRoute: Boolean = true
+    ): List<Pair<AiConnection, String>> {
+        if (usePersonalRoute) {
+            vaultStore?.preferredConnection(kind)?.let { connection ->
+                return listOf(connection to connection.defaultModel)
+            }
+        }
         val all = vaultStore?.connections?.value.orEmpty()
         val builtIn = if (kind == "stt") ProviderPresets.builtInSttConnection() else ProviderPresets.builtInAiConnection()
         val pool = all.filter { it.kind == kind && it.enabled }
@@ -147,7 +156,7 @@ open class AiService(
         jsonMode: Boolean,
         prices: List<ModelPrice>
     ): Result<Pair<String, AiCallMeta>> {
-        val targets = resolveRouteTargets(config, "ai")
+        val targets = resolveRouteTargets(config, "ai", usePersonalRoute = taskName != "playground")
         val temp = (config?.temperature ?: 0.2).toFloat()
         val maxTok = (config?.maxOutputTokens ?: 4096L).toInt().coerceIn(256, 16384)
         val timeoutSec = (config?.timeoutSec ?: 65L).toInt().coerceIn(15, 180)
@@ -160,7 +169,8 @@ open class AiService(
             repeat(maxAttempts) {
                 try {
                     if (isBuiltInBackend(conn)) {
-                        val res = withTimeout((timeoutSec + 10) * 1000L) {
+                        val backendTimeoutSec = timeoutSec.coerceAtLeast(135)
+                        val res = withTimeout((backendTimeoutSec + 10) * 1000L) {
                             backendAiClient.processTextTask(
                                 task = taskName,
                                 systemPrompt = systemPrompt,
@@ -169,7 +179,7 @@ open class AiService(
                                 temperature = temp,
                                 maxTokens = maxTok,
                                 jsonMode = jsonMode,
-                                timeoutSec = timeoutSec
+                                timeoutSec = backendTimeoutSec
                             )
                         }
                         res.onSuccess { p ->
@@ -258,13 +268,14 @@ open class AiService(
             val isFallback = idx > 0
             try {
                 if (isBuiltInBackend(conn)) {
-                    val res = withTimeout((timeoutSec + 10) * 1000L) {
+                    val backendTimeoutSec = timeoutSec.coerceAtLeast(115)
+                    val res = withTimeout((backendTimeoutSec + 10) * 1000L) {
                         backendAiClient.transcribeAudio(
                             audioBytes = audioBytes,
                             mimeType = mimeType,
                             preferredLanguage = preferredLanguage,
                             systemPrompt = systemPrompt,
-                            timeoutSec = timeoutSec
+                            timeoutSec = backendTimeoutSec
                         )
                     }
                     res.onSuccess { p ->

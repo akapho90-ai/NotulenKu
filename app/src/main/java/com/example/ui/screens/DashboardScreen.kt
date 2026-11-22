@@ -128,7 +128,10 @@ fun DashboardScreen(
     onCheckAiHealth: () -> Unit,
     periodicSummaryState: UiState<PeriodicSummaryResult>? = null,
     onGeneratePeriodicSummary: (periodType: String, meetings: List<Meeting>) -> Unit = { _, _ -> },
-    onClearPeriodicSummary: () -> Unit = {}
+    onClearPeriodicSummary: () -> Unit = {},
+    workspaceLabel: String = activeTenant?.name ?: "Belum ada organisasi",
+    workspaceError: String? = null,
+    onRetryWorkspace: () -> Unit = {}
 ) {
     var showAllTasksDialog by remember { mutableStateOf(false) }
     var infoPopup by remember { mutableStateOf<Pair<String, String>?>(null) }
@@ -179,7 +182,7 @@ fun DashboardScreen(
                     HeroGreetingBanner(
                         greeting = greeting,
                         dateText = dateLabel,
-                        tenantName = activeTenant?.name ?: "Memuat...",
+                        tenantName = workspaceLabel,
                         displayName = displayName,
                         photoUrl = photoUrl,
                         isAdminOrOwner = isAdminOrOwner,
@@ -188,6 +191,18 @@ fun DashboardScreen(
                             if (connectionHealthy == false) onOpenAdminSettings(0) else onCheckAiHealth()
                         }
                     )
+                }
+
+                if (workspaceError != null) {
+                    item {
+                        NotulenCard {
+                            Column(modifier = Modifier.padding(16.dp)) {
+                                Text("Workspace tidak dapat dimuat", style = MaterialTheme.typography.titleSmall)
+                                Text(workspaceError, style = MaterialTheme.typography.bodySmall)
+                                TextButton(onClick = onRetryWorkspace) { Text("Muat ulang workspace") }
+                            }
+                        }
+                    }
                 }
 
                 // 2. 4 Quick Action Gradient Tiles

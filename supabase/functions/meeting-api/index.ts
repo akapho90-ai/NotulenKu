@@ -21,6 +21,7 @@ const MAX_TEXT_CHARS = 150_000;
 const MAX_SYSTEM_CHARS = 8_000;
 const MAX_AUDIO_BYTES = 10 * 1024 * 1024; // 10 MB raw audio per segment
 const TEXT_TIMEOUT_MS = 55_000;
+const TEXT_TOTAL_TIMEOUT_MS = 120_000;
 const AUDIO_TIMEOUT_MS = 110_000;
 const HEALTH_TIMEOUT_MS = 20_000;
 
@@ -249,15 +250,16 @@ function extractJsonObject(raw: string): string {
   return fenced;
 }
 
-async function fetchWithTimeout(
+async function fetchTextWithTimeout(
   url: string,
   init: RequestInit,
   timeoutMs: number,
-): Promise<Response> {
+): Promise<{ ok: boolean; status: number; text: string }> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    return await fetch(url, { ...init, signal: controller.signal });
+    const response = await fetch(url, { ...init, signal: controller.signal });
+    return { ok: response.ok, status: response.status, text: await response.text() };
   } catch (err) {
     if (err instanceof DOMException && err.name === "AbortError") {
       throw new ApiError(504, "DEADLINE_EXCEEDED", "Pemrosesan AI melewati batas waktu. Silakan coba lagi.");
@@ -348,7 +350,7 @@ async function callSumoPodChat(params: {
     body.response_format = { type: "json_object" };
   }
 
-  const resp = await fetchWithTimeout(
+  const resp = await fetchTextWithTimeout(
     `${SUMOPOD_BASE_URL}/chat/completions`,
     {
       method: "POST",
@@ -361,7 +363,7 @@ async function callSumoPodChat(params: {
     params.timeoutMs,
   );
 
-  const rawText = await resp.text();
+  const rawText = resp.text;
   if (!resp.ok) {
     const safeMsg = sanitizeSecretFromText(rawText.slice(0, 300), [params.apiKey]);
     const lower = safeMsg.toLowerCase();
@@ -543,7 +545,10 @@ async function handleProcessAi(auth: VerifiedFirebaseAuth, data: Record<string, 
   messages.push({ role: "user", content: userPrompt });
 
   let lastError: ApiError | null = null;
+  const deadline = Date.now() + TEXT_TOTAL_TIMEOUT_MS;
   for (let i = 0; i < models.length; i++) {
+    const remainingMs = deadline - Date.now();
+    if (remainingMs <= 0) break;
     const model = models[i];
     try {
       const result = await callSumoPodChat({
@@ -553,7 +558,7 @@ async function handleProcessAi(auth: VerifiedFirebaseAuth, data: Record<string, 
         temperature,
         maxTokens,
         jsonMode,
-        timeoutMs: TEXT_TIMEOUT_MS,
+        timeoutMs: Math.min(TEXT_TIMEOUT_MS, remainingMs),
       });
 
       if (jsonMode) {
@@ -591,7 +596,7 @@ async function handleCheckAiHealth(auth: VerifiedFirebaseAuth) {
   await enforceRateLimit(auth.uid);
   const apiKey = getSumoPodKey();
   const startedAt = Date.now();
-  const resp = await fetchWithTimeout(
+  const resp = await fetchTextWithTimeout(
     `${SUMOPOD_BASE_URL}/models`,
     {
       method: "GET",
@@ -606,8 +611,14 @@ async function handleCheckAiHealth(auth: VerifiedFirebaseAuth) {
       `Koneksi backend ke SumoPod gagal (HTTP ${resp.status}).`,
     );
   }
-  const body = (await resp.json().catch(() => ({}))) as { data?: Array<{ id?: string }> };
-  const listed = new Set((body.data || []).map((m) => String(m.id || "")));
+  let listed: Set<string>;
+  try {
+    const body = JSON.parse(resp.text) as { data?: Array<{ id?: string }> };
+    if (!Array.isArray(body.data)) throw new Error("Daftar model tidak ditemukan");
+    listed = new Set(body.data.map((model) => String(model.id || "")));
+  } catch {
+    throw new ApiError(502, "INVALID_UPSTREAM_RESPONSE", "SumoPod tidak mengembalikan daftar model yang valid.");
+  }
   const configuredModels = [
     "gemini/gemini-3.5-flash-lite",
     "glm-5.3-flash",
@@ -618,7 +629,7 @@ async function handleCheckAiHealth(auth: VerifiedFirebaseAuth) {
     ok: true,
     provider: "SumoPod AI",
     latencyMs: Date.now() - startedAt,
-    availableModels: configuredModels.filter((m) => listed.size === 0 || listed.has(m)),
+    availableModels: configuredModels.filter((model) => listed.has(model)),
   };
 }
 
@@ -642,7 +653,7 @@ async function supabaseFetch(
 ) {
   const env = getSupabaseEnv();
   const key = options.useAnon ? env.anonKey : env.serviceRoleKey;
-  const resp = await fetchWithTimeout(
+  const resp = await fetchTextWithTimeout(
     `${env.url}${path}`,
     {
       method: options.method || "GET",
@@ -656,7 +667,7 @@ async function supabaseFetch(
     },
     20_000,
   );
-  const text = await resp.text();
+  const text = resp.text;
   const parsed = text ? (() => { try { return JSON.parse(text); } catch { return text; } })() : null;
   if (!resp.ok) {
     const err = new Error(
@@ -982,7 +993,7 @@ async function handleLinkSupabaseAccount(auth: VerifiedFirebaseAuth, data: Recor
   if (accessToken) {
     try {
       const env = getSupabaseEnv();
-      const resp = await fetchWithTimeout(
+      const resp = await fetchTextWithTimeout(
         `${env.url}/auth/v1/user`,
         {
           method: "GET",
@@ -991,7 +1002,7 @@ async function handleLinkSupabaseAccount(auth: VerifiedFirebaseAuth, data: Recor
         15_000,
       );
       if (!resp.ok) throw new Error("invalid token");
-      verifiedUser = (await resp.json()) as { id?: string; email?: string };
+      verifiedUser = JSON.parse(resp.text) as { id?: string; email?: string };
       linkMethod = "verified_supabase_jwt";
     } catch {
       throw new ApiError(403, "PERMISSION_DENIED", "Token verifikasi akun Supabase tidak valid atau kedaluwarsa.");

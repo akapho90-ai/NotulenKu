@@ -137,7 +137,7 @@ service cloud.firestore {
 
     function isValidTaskConfig(data, tenantId) {
       return data.tenantId == tenantId &&
-             data.task in ['audio_transcription', 'meeting_summary', 'meeting_analysis', 'meeting_qa', 'action_item_extraction', 'transcript_correction', 'structured_visual_data'] &&
+             data.task in ['audio_transcription', 'meeting_summary', 'meeting_analysis', 'meeting_qa', 'action_item_extraction', 'transcript_correction', 'structured_visual_data', 'periodic_summary'] &&
              data.providerLabel is string && data.providerLabel.size() >= 1 && data.providerLabel.size() <= 60 &&
              data.modelId is string && data.modelId.size() >= 1 && data.modelId.size() <= 80 &&
              (!('connectionId' in data) || (data.connectionId is string && data.connectionId.size() <= 80)) &&

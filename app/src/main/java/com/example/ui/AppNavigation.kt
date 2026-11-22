@@ -91,6 +91,7 @@ import com.example.ui.screens.AuthScreen
 import com.example.ui.screens.DashboardScreen
 import com.example.ui.screens.HistoryScreen
 import com.example.ui.screens.MeetingDetailScreen
+import com.example.ui.screens.PersonalProviderScreen
 import com.example.ui.screens.ProfileScreen
 import com.example.ui.screens.QaScreen
 import com.example.ui.screens.RecordScreen
@@ -114,6 +115,7 @@ private object Routes {
     fun record(mode: Int = 0) = "record?mode=$mode"
     const val QA = "qa"
     const val PROFILE = "profile"
+    const val PROVIDERS = "providers"
     const val MEETING_DETAIL_PATTERN = "meeting/{meetingId}?tab={tab}"
     fun meetingDetail(meetingId: String, tab: Int = 0) = "meeting/$meetingId?tab=$tab"
     const val ADMIN_PATTERN = "admin?tab={tab}"
@@ -160,7 +162,8 @@ private fun AuthenticatedShell(
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val credentialManager = remember { CredentialManager.create(context) }
-    val vaultStore = remember { ConnectionVaultStore(context.applicationContext) }
+    val vaultStore = remember(userId) { ConnectionVaultStore(context.applicationContext, userId) }
+    val preferredConnections by vaultStore.preferredConnections.collectAsStateWithLifecycle()
     val sharedAiService = remember(vaultStore) { AiService(vaultStore) }
 
     val workspaceVm: WorkspaceViewModel = viewModel(
@@ -213,6 +216,12 @@ private fun AuthenticatedShell(
     val workspaceState by workspaceVm.workspaceState.collectAsStateWithLifecycle()
     val snapshot = (workspaceState as? UiState.Success<WorkspaceSnapshot>)?.data
     val activeTenant = snapshot?.activeTenant
+    val workspaceError = (workspaceState as? UiState.Error)?.message
+    val workspaceLabel = activeTenant?.name ?: when (workspaceState) {
+        UiState.Loading -> "Memuat..."
+        is UiState.Error -> "Workspace tidak tersedia"
+        is UiState.Success -> "Belum ada organisasi"
+    }
 
     LaunchedEffect(activeTenant?.id, activeTenant?.name, activeTenant?.aiMode, activeTenant?.watermarkEnabled) {
         meetingVm.setActiveTenant(activeTenant)
@@ -346,7 +355,7 @@ private fun AuthenticatedShell(
                             }
                             Spacer(modifier = Modifier.width(8.dp))
                             TenantSelectorChip(
-                                tenantName = activeTenant?.name ?: "Memuat...",
+                                tenantName = workspaceLabel,
                                 onClick = { showTenantSheet = true }
                             )
                         }
@@ -497,7 +506,10 @@ private fun AuthenticatedShell(
                                         prices = modelPrices
                                     )
                                 },
-                                onClearPeriodicSummary = { meetingVm.clearPeriodicSummary() }
+                                onClearPeriodicSummary = { meetingVm.clearPeriodicSummary() },
+                                workspaceLabel = workspaceLabel,
+                                workspaceError = workspaceError,
+                                onRetryWorkspace = workspaceVm::retryWorkspace
                             )
                         }
 
@@ -612,6 +624,20 @@ private fun AuthenticatedShell(
                             )
                         }
 
+                        composable(Routes.PROVIDERS) {
+                            PersonalProviderScreen(
+                                connections = connections,
+                                preferredConnections = preferredConnections,
+                                onBack = { navController.popBackStack() },
+                                onSelectConnection = vaultStore::selectPersonalConnection,
+                                onUpsertConnection = workspaceVm::upsertConnection,
+                                onToggleConnection = workspaceVm::toggleConnection,
+                                onDeleteConnection = workspaceVm::deleteConnection,
+                                onTestConnection = workspaceVm::testCustomConnection,
+                                onFetchModels = workspaceVm::fetchModelsForConnection
+                            )
+                        }
+
                         composable(Routes.PROFILE) {
                             val allMeetings = (meetingsState as? UiState.Success)?.data.orEmpty()
                             ProfileScreen(
@@ -645,6 +671,7 @@ private fun AuthenticatedShell(
                                         navController.navigate(Routes.admin(tab))
                                     }
                                 },
+                                onOpenProviders = { navController.navigate(Routes.PROVIDERS) },
                                 onDeleteAccount = {
                                     workspaceVm.deleteAccountProfile {
                                         signOutUser(credentialManager, scope)

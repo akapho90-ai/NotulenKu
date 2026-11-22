@@ -26,6 +26,7 @@ import com.google.firebase.auth.auth
 import com.google.firebase.firestore.FirebaseFirestoreException
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -36,6 +37,7 @@ import kotlinx.coroutines.flow.firstOrNull
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.onStart
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 
@@ -69,6 +71,8 @@ class WorkspaceViewModel(
 ) : ViewModel() {
 
     private val _selectedTenantId = MutableStateFlow<String?>(null)
+    private val workspaceReload = MutableStateFlow(0)
+    private var provisioningJob: Job? = null
     private val _actionMessage = MutableStateFlow<String?>(null)
     val actionMessage: StateFlow<String?> = _actionMessage.asStateFlow()
 
@@ -114,55 +118,67 @@ class WorkspaceViewModel(
             if (!savedId.isNullOrBlank()) {
                 _selectedTenantId.value = savedId
             }
-            val user = Firebase.auth.currentUser
-            if (user != null) {
-                tenantRepo.ensureUserAndPersonalTenant(user)
-                    .onSuccess { provisionedId ->
-                        if (_selectedTenantId.value == null) {
-                            _selectedTenantId.value = provisionedId
-                        }
-                    }
-                    .onFailure { e ->
-                        _actionMessage.value = toFriendlyIndonesianError(e)
-                    }
-            }
+            retryWorkspace()
         }
     }
 
-    val workspaceState: StateFlow<UiState<WorkspaceSnapshot>> = combine(
-        tenantRepo.observeUserProfile(currentUserId),
-        tenantRepo.observeUserTenants(currentUserId),
-        _selectedTenantId
-    ) { profile, tenants, selectedId ->
-        val candidateId = selectedId ?: profile?.activeTenantId
-        val active = tenants.firstOrNull { it.id == candidateId } ?: tenants.firstOrNull()
-        val role = when {
-            active == null -> "member"
-            active.ownerId == currentUserId -> "owner"
-            currentUserId in active.adminUids -> "admin"
-            else -> "member"
+    fun retryWorkspace() {
+        if (provisioningJob?.isActive == true) return
+        workspaceReload.value += 1
+        provisioningJob = viewModelScope.launch {
+            val user = Firebase.auth.currentUser ?: return@launch
+            if (user.uid != currentUserId) return@launch
+            tenantRepo.ensureUserAndPersonalTenant(user)
+                .onSuccess { provisionedId ->
+                    if (_selectedTenantId.value == null) {
+                        _selectedTenantId.value = provisionedId
+                    }
+                }
+                .onFailure { error ->
+                    _actionMessage.value = "Workspace: ${toFriendlyIndonesianError(error)}"
+                }
         }
-        val email = Firebase.auth.currentUser?.email.orEmpty()
-        val platformAdmin = email.equals(AppConstants.PLATFORM_ADMIN_EMAIL, ignoreCase = true)
-        UiState.Success(
-            WorkspaceSnapshot(
-                profile = profile,
-                tenants = tenants,
-                activeTenant = active,
-                roleInActiveTenant = role,
-                isPlatformAdmin = platformAdmin
-            )
-        ) as UiState<WorkspaceSnapshot>
     }
-        .catch { error ->
-            val fsErr = generateSequence(error) { it.cause }
-                .filterIsInstance<FirebaseFirestoreException>()
-                .firstOrNull()
-            if (fsErr == null && error is CancellationException) throw error
-            Log.w(TAG, "Workspace observation error", fsErr ?: error)
-            emit(UiState.Error(toFriendlyIndonesianError(fsErr ?: error)))
+
+    @OptIn(ExperimentalCoroutinesApi::class)
+    val workspaceState: StateFlow<UiState<WorkspaceSnapshot>> = workspaceReload.flatMapLatest {
+        combine(
+            tenantRepo.observeUserProfile(currentUserId),
+            tenantRepo.observeUserTenants(currentUserId),
+            _selectedTenantId
+        ) { profile, tenants, selectedId ->
+            val candidateId = selectedId ?: profile?.activeTenantId
+            val active = tenants.firstOrNull { it.id == candidateId } ?: tenants.firstOrNull()
+            val role = when {
+                active == null -> "member"
+                active.ownerId == currentUserId -> "owner"
+                currentUserId in active.adminUids -> "admin"
+                else -> "member"
+            }
+            val user = Firebase.auth.currentUser
+            val platformAdmin = user != null && user.uid == currentUserId &&
+                user.isEmailVerified &&
+                user.email.equals(AppConstants.PLATFORM_ADMIN_EMAIL, ignoreCase = true)
+            UiState.Success(
+                WorkspaceSnapshot(
+                    profile = profile,
+                    tenants = tenants,
+                    activeTenant = active,
+                    roleInActiveTenant = role,
+                    isPlatformAdmin = platformAdmin
+                )
+            ) as UiState<WorkspaceSnapshot>
         }
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000L), UiState.Loading)
+            .onStart { emit(UiState.Loading) }
+            .catch { error ->
+                val fsErr = generateSequence(error) { it.cause }
+                    .filterIsInstance<FirebaseFirestoreException>()
+                    .firstOrNull()
+                if (fsErr == null && error is CancellationException) throw error
+                Log.w(TAG, "Workspace observation error", fsErr ?: error)
+                emit(UiState.Error(toFriendlyIndonesianError(fsErr ?: error)))
+            }
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000L), UiState.Loading)
 
     @OptIn(ExperimentalCoroutinesApi::class)
     val members: StateFlow<List<TenantMember>> = workspaceState

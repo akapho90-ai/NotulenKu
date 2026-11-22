@@ -10,16 +10,19 @@ import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.CloudDone
@@ -76,6 +79,55 @@ import com.example.ui.theme.StatusRose
 import java.util.Date
 
 @Composable
+fun PersonalProviderScreen(
+    connections: List<AiConnection>,
+    preferredConnections: Map<String, String>,
+    onBack: () -> Unit,
+    onSelectConnection: (AiConnection) -> Unit,
+    onUpsertConnection: (AiConnection, String?) -> Unit,
+    onToggleConnection: (String) -> Unit,
+    onDeleteConnection: (String) -> Unit,
+    onTestConnection: (AiConnection, String?, (Boolean, String) -> Unit) -> Unit,
+    onFetchModels: (AiConnection, String?, (Result<List<String>>) -> Unit) -> Unit
+) {
+    var kind by remember { mutableStateOf("ai") }
+    val selectedId = preferredConnections[kind]?.takeIf { id ->
+        connections.any { it.id == id && it.enabled }
+    }
+    Column(
+        modifier = Modifier.fillMaxSize().statusBarsPadding()
+            .verticalScroll(rememberScrollState()).padding(16.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp)
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            IconButton(onClick = onBack) {
+                Icon(Icons.AutoMirrored.Rounded.ArrowBack, contentDescription = "Kembali")
+            }
+            Text("Provider AI", style = MaterialTheme.typography.titleLarge)
+        }
+        Text(
+            "Pilih koneksi kustom untuk memproses rapat pribadi. Rute default mengikuti pengaturan workspace atau memakai layanan SumoPod bawaan.",
+            style = MaterialTheme.typography.bodyMedium
+        )
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            FilterChip(selected = kind == "ai", onClick = { kind = "ai" }, label = { Text("Notulen & AI") })
+            FilterChip(selected = kind == "stt", onClick = { kind = "stt" }, label = { Text("Transkripsi") })
+        }
+        ConnectionsSection(
+            kind = kind,
+            connections = connections,
+            onUpsertConnection = onUpsertConnection,
+            onToggleConnection = onToggleConnection,
+            onDeleteConnection = onDeleteConnection,
+            onTestConnection = onTestConnection,
+            onFetchModels = onFetchModels,
+            selectedConnectionId = selectedId,
+            onSelectConnection = onSelectConnection
+        )
+    }
+}
+
+@Composable
 fun ConnectionsSection(
     kind: String, // "ai" | "stt"
     connections: List<AiConnection>,
@@ -83,7 +135,9 @@ fun ConnectionsSection(
     onToggleConnection: (String) -> Unit,
     onDeleteConnection: (String) -> Unit,
     onTestConnection: (AiConnection, String?, (Boolean, String) -> Unit) -> Unit,
-    onFetchModels: (AiConnection, String?, (Result<List<String>>) -> Unit) -> Unit
+    onFetchModels: (AiConnection, String?, (Result<List<String>>) -> Unit) -> Unit,
+    selectedConnectionId: String? = null,
+    onSelectConnection: ((AiConnection) -> Unit)? = null
 ) {
     val filtered = remember(connections, kind) { connections.filter { it.kind == kind } }
     var editingConnection by remember { mutableStateOf<AiConnection?>(null) }
@@ -148,7 +202,9 @@ fun ConnectionsSection(
             onToggle = { onToggleConnection(conn.id) },
             onTest = { onTestConnection(conn, null) { _, _ -> } },
             onEdit = { editingConnection = conn },
-            onDelete = { deleteTarget = conn }
+            onDelete = { deleteTarget = conn },
+            isSelected = conn.id == selectedConnectionId || (conn.isBuiltIn && selectedConnectionId == null),
+            onSelect = onSelectConnection?.let { select -> { select(conn) } }
         )
     }
 
@@ -186,7 +242,9 @@ private fun ConnectionCardItem(
     onToggle: () -> Unit,
     onTest: () -> Unit,
     onEdit: () -> Unit,
-    onDelete: () -> Unit
+    onDelete: () -> Unit,
+    isSelected: Boolean,
+    onSelect: (() -> Unit)?
 ) {
     val (statusLabel, statusColor) = when {
         !connection.enabled -> "Nonaktif" to MaterialTheme.colorScheme.onSurfaceVariant
@@ -247,6 +305,20 @@ private fun ConnectionCardItem(
                 if (!connection.isBuiltIn) {
                     Spacer(modifier = Modifier.width(6.dp))
                     Switch(checked = connection.enabled, onCheckedChange = { onToggle() })
+                }
+            }
+
+            if (onSelect != null) {
+                OutlinedButton(
+                    onClick = onSelect,
+                    enabled = !isSelected && connection.enabled && connection.defaultModel.isNotBlank()
+                ) {
+                    Text(when {
+                        isSelected && connection.isBuiltIn -> "Rute default aktif"
+                        isSelected -> "Dipakai untuk rapat pribadi"
+                        connection.isBuiltIn -> "Pakai rute default"
+                        else -> "Pakai ${connection.defaultModel}"
+                    })
                 }
             }
 

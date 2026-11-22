@@ -133,6 +133,7 @@ fun ProfileScreen(
     onReduceMotionChange: (Boolean) -> Unit = {},
     onOpenAdminHub: (Int) -> Unit,
     onDeleteAccount: () -> Unit = {},
+    onOpenProviders: () -> Unit = {},
     onSignOut: () -> Unit
 ) {
     val context = LocalContext.current
@@ -385,6 +386,14 @@ fun ProfileScreen(
                         title = "Pemakaian Saya",
                         subtitle = "${meetings.size} rapat • ${usageLogs.size} panggilan AI",
                         onClick = { activeSheet = ProfileSheetType.USAGE }
+                    )
+                    HorizontalDivider(modifier = Modifier.padding(horizontal = 16.dp))
+                    ProfileMenuRow(
+                        icon = Icons.Rounded.AdminPanelSettings,
+                        tint = BrandBlue,
+                        title = "Provider AI",
+                        subtitle = "Pilih layanan untuk notulen dan transkripsi",
+                        onClick = onOpenProviders
                     )
                     HorizontalDivider(modifier = Modifier.padding(horizontal = 16.dp))
                     ProfileMenuRow(

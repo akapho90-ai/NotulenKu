@@ -7,6 +7,7 @@ import com.example.core.OperationType
 import com.example.core.handleFirestoreError
 import com.example.data.model.AuditLog
 import com.example.data.model.ModelPrice
+import com.example.data.model.ProviderPresets
 import com.example.data.model.TaskConfig
 import com.example.data.model.Tenant
 import com.example.data.model.TenantInvite
@@ -149,7 +150,11 @@ class TenantRepository(
                 .get()
                 .await()
 
-            var activeTenantId = existingTenants.documents.firstOrNull()?.id
+            val ownedOrJoined = existingTenants.documents
+            val savedTenantId = userSnap.getString("activeTenantId")
+            val existingTenant = ownedOrJoined.firstOrNull { it.id == savedTenantId }
+                ?: ownedOrJoined.firstOrNull()
+            var activeTenantId = existingTenant?.id
 
             if (activeTenantId == null) {
                 val emailPrefix = user.email?.substringBefore("@")?.take(40)?.ifBlank { "Pribadi" } ?: "Pribadi"
@@ -190,6 +195,14 @@ class TenantRepository(
                 }
             }
 
+            if (existingTenant?.getString("ownerId") == uid) {
+                ensureOwnerDefaults(
+                    tenantId = activeTenantId,
+                    ownerUid = uid,
+                    ownerName = user.displayName ?: "Pemilik",
+                    ownerEmail = user.email.orEmpty()
+                )
+            }
             Result.success(activeTenantId)
         } catch (e: CancellationException) {
             throw e
@@ -258,37 +271,51 @@ class TenantRepository(
         )
         db.collection("tenants").document(tenantId).set(tenant.toCreateMap()).await()
 
-        val member = TenantMember(
-            userId = ownerUid,
-            tenantId = tenantId,
-            displayName = ownerName.ifBlank { "Pemilik" },
-            email = ownerEmail,
-            role = "owner",
-            memberStatus = "active",
-            memberUids = listOf(ownerUid)
-        )
-        db.collection("tenants").document(tenantId).collection("members")
-            .document(ownerUid).set(member.toCreateMap()).await()
+        ensureOwnerDefaults(tenantId, ownerUid, ownerName, ownerEmail)
+    }
 
-        // Seed default task configs
-        AppConstants.AI_TASKS.forEach { taskDef ->
-            val isStt = taskDef.key == "audio_transcription"
-            val cfg = TaskConfig(
-                tenantId = tenantId,
-                task = taskDef.key,
-                providerLabel = "SumoPod AI",
-                modelId = taskDef.defaultModelId,
-                connectionId = if (isStt) com.example.data.model.ProviderPresets.BUILT_IN_STT_ID
-                else com.example.data.model.ProviderPresets.BUILT_IN_AI_ID,
-                temperature = 0.2,
-                maxOutputTokens = 4096L,
-                enabled = true,
-                systemPromptOverride = "",
-                memberUids = listOf(ownerUid)
-            )
-            db.collection("tenants").document(tenantId).collection("taskConfigs")
-                .document(taskDef.key).set(cfg.toCreateMap()).await()
-        }
+    private suspend fun ensureOwnerDefaults(
+        tenantId: String,
+        ownerUid: String,
+        ownerName: String,
+        ownerEmail: String
+    ) {
+        val tenantRef = db.collection("tenants").document(tenantId)
+        val memberRef = tenantRef.collection("members").document(ownerUid)
+        val configs = tenantRef.collection("taskConfigs")
+        db.runTransaction { transaction ->
+            val tenant = transaction.get(tenantRef).toObject(Tenant::class.java)
+            check(tenant != null && tenant.ownerId == ownerUid) { "Workspace pemilik tidak tersedia." }
+            val missingOwner = !transaction.get(memberRef).exists()
+            val missingTasks = AppConstants.AI_TASKS.filter { task ->
+                !transaction.get(configs.document(task.key)).exists()
+            }
+
+            if (missingOwner) {
+                val member = TenantMember(
+                    userId = ownerUid,
+                    tenantId = tenantId,
+                    displayName = ownerName.ifBlank { "Pemilik" },
+                    email = ownerEmail,
+                    role = "owner",
+                    memberStatus = "active",
+                    memberUids = tenant.memberUids
+                )
+                transaction.set(memberRef, member.toCreateMap())
+            }
+            missingTasks.forEach { task ->
+                val config = TaskConfig(
+                    tenantId = tenantId,
+                    task = task.key,
+                    providerLabel = "SumoPod AI",
+                    modelId = task.defaultModelId,
+                    connectionId = if (task.key == "audio_transcription") ProviderPresets.BUILT_IN_STT_ID
+                    else ProviderPresets.BUILT_IN_AI_ID,
+                    memberUids = tenant.memberUids
+                )
+                transaction.set(configs.document(task.key), config.toCreateMap())
+            }
+        }.await()
     }
 
     suspend fun setActiveTenant(tenantId: String): Result<Unit> {
