@@ -25,10 +25,23 @@ class ExperimentalLiveCaptureSession(
         queueCapacity = queueCapacity
     )
     private val worker = LiveTranscriptionWorker(sessionId, adapter, provider, scope)
+    private val pcmWriter = ExperimentalPcmSegmentWriter(
+        directory = java.io.File(context.filesDir, "experimental_live_pcm"),
+        sessionId = sessionId,
+        sampleRateHz = sampleRateHz
+    )
     private val capture = AudioRecordCaptureEngine(
         context = context,
         sampleRateHz = sampleRateHz,
-        onPcmRead = { bytes, timestamp -> adapter.acceptPcm(bytes, timestamp) },
+        onPcmRead = { bytes, timestamp ->
+            try {
+                pcmWriter.append(bytes)
+                adapter.acceptPcm(bytes, timestamp)
+            } catch (failure: Throwable) {
+                LiveTranscriptRepository.setStatus(sessionId, LiveTranscriptionStatus.DEGRADED, "Penyimpanan PCM eksperimental gagal: ${failure.localizedMessage ?: "error"}")
+                onCaptureError("Penyimpanan PCM eksperimental gagal.")
+            }
+        },
         onError = { message ->
             LiveTranscriptRepository.setStatus(sessionId, LiveTranscriptionStatus.DEGRADED, message)
             onCaptureError(message)
@@ -38,9 +51,14 @@ class ExperimentalLiveCaptureSession(
     /** Starts STT worker and then capture; on capture startup failure, worker is stopped. */
     fun start(): Boolean {
         if (capture.isCapturing) return true
+        try { pcmWriter.open() } catch (failure: Throwable) {
+            onCaptureError("Tidak dapat membuka file PCM eksperimental.")
+            return false
+        }
         worker.start()
         if (!capture.start()) {
             worker.stop()
+            runCatching { pcmWriter.close() }
             return false
         }
         return true
@@ -51,6 +69,7 @@ class ExperimentalLiveCaptureSession(
         capture.stop()
         worker.stop()
         adapter.clear()
+        runCatching { pcmWriter.close() }
     }
 
     val isCapturing: Boolean get() = capture.isCapturing
