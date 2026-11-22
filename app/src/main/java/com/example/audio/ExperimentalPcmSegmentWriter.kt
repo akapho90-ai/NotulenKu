@@ -22,6 +22,7 @@ class ExperimentalPcmSegmentWriter(
     private var stream: BufferedOutputStream? = null
     private var bytesWritten = 0L
     private var bytesSinceFlush = 0
+    private val journal = ExperimentalPcmSessionJournal(directory)
 
     init {
         require(sessionId.isNotBlank())
@@ -41,6 +42,7 @@ class ExperimentalPcmSegmentWriter(
         stream = BufferedOutputStream(FileOutputStream(file, true))
         bytesWritten = file.length()
         writeCheckpoint(force = true)
+        journal.write(metadata(ExperimentalPcmSessionStatus.RECORDING))
         return file
     }
 
@@ -98,6 +100,7 @@ class ExperimentalPcmSegmentWriter(
                 temp.delete()
             }
             bytesSinceFlush = 0
+            journal.write(metadata(ExperimentalPcmSessionStatus.RECORDING))
         }
     }
 
@@ -107,12 +110,12 @@ class ExperimentalPcmSegmentWriter(
         try {
             out.flush()
             writeCheckpoint(force = true)
+            journal.write(metadata(ExperimentalPcmSessionStatus.RECOVERABLE))
         } finally {
             runCatching { out.close() }
             stream = null
         }
     }
 
-    val currentFile: File get() = file
-    val totalBytes: Long get() = bytesWritten
+    private fun metadata(status: ExperimentalPcmSessionStatus) = ExperimentalPcmSessionMetadata(\n        sessionId = sessionId, fileName = file.name, sampleRateHz = sampleRateHz,\n        status = status, checkpointBytes = bytesWritten, updatedAtEpochMs = System.currentTimeMillis()\n    )\n\n    val currentFile: File get() = file\n    val totalBytes: Long get() = bytesWritten
 }
