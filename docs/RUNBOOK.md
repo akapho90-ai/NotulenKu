@@ -14,6 +14,8 @@ Pastikan secret berikut sudah aktif di **Supabase Dashboard → Project Settings
 - `FIREBASE_PROJECT_ID` — `gen-lang-client-0830960267` (opsional, sudah menjadi default di kode)
 
 ### Langkah Deploy
+Pastikan migrasi rate limit `002_ai_rate_limits.sql` sudah diterapkan. Untuk instalasi baru, jalankan juga migrasi identitas `003_scope_firebase_identities_and_save_idempotently.sql`; project produksi yang sudah memiliki kolom `firebase_project_id` perlu memverifikasi skema yang terpasang sebelum menjalankan migrasi itu.
+
 ```bash
 supabase functions deploy meeting-api \
   --project-ref ojmdiiwowiqvcxgexxgr \
@@ -32,7 +34,7 @@ supabase functions deploy meeting-api \
      "data": {
        "task": "audio_transcription",
        "audioBase64": "<BASE64_AUDIO_M4A_UJI>",
-       "audioMimeType": "audio/mp4",
+       "mimeType": "audio/mp4",
        "preferredLanguage": "id"
      }
    }
