@@ -7,7 +7,7 @@ import kotlinx.coroutines.launch
 
 /**
  * Isolated consumer for the capture-to-transcription queue.
- * It never owns or stops the audio recorder and does not attempt provider-specific fallback.
+ * It never owns or stops the audio recorder.
  */
 class LiveTranscriptionWorker(
     private val sessionId: String,
@@ -22,17 +22,24 @@ class LiveTranscriptionWorker(
         if (job?.isActive == true || sessionId.isBlank()) return false
         LiveTranscriptRepository.begin(sessionId, LiveTranscriptionStatus.CONNECTING)
         job = scope.launch {
+            val manager = LiveTranscriptionConnectionManager(
+                sessionId = sessionId,
+                provider = provider,
+                onStatus = { status, error -> LiveTranscriptRepository.setStatus(sessionId, status, error) },
+                onPartial = { LiveTranscriptRepository.upsert(sessionId, it.copy(isFinal = false)) },
+                onFinal = { LiveTranscriptRepository.upsert(sessionId, it.copy(isFinal = true)) }
+            )
             try {
-                provider.open(
-                    sessionId,
-                    onPartial = { LiveTranscriptRepository.upsert(sessionId, it.copy(isFinal = false)) },
-                    onFinal = { LiveTranscriptRepository.upsert(sessionId, it.copy(isFinal = true)) }
-                )
-                LiveTranscriptRepository.setStatus(sessionId, LiveTranscriptionStatus.LIVE)
+                if (!manager.connect()) return@launch
                 while (true) {
-                    provider.sendFrame(adapter.awaitFrame())
+                    val frame = adapter.awaitFrame()
+                    manager.sendFrame(frame)
                     if (adapter.droppedFrameCount > 0) {
-                        LiveTranscriptRepository.setStatus(sessionId, LiveTranscriptionStatus.DEGRADED, "Sebagian frame audio transkripsi terlewat. Rekaman utama tetap aman.")
+                        LiveTranscriptRepository.setStatus(
+                            sessionId,
+                            LiveTranscriptionStatus.DEGRADED,
+                            "Sebagian frame audio transkripsi terlewat. Rekaman utama tetap aman."
+                        )
                     }
                 }
             } catch (cancelled: CancellationException) {
@@ -43,7 +50,7 @@ class LiveTranscriptionWorker(
                     failure.message ?: failure::class.java.simpleName
                 )
             } finally {
-                try { provider.close() } catch (_: Throwable) { /* best-effort shutdown */ }
+                try { manager.close() } catch (_: Throwable) { /* best-effort shutdown */ }
             }
         }
         return true
