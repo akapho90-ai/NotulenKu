@@ -12,12 +12,19 @@ private const val TAG = "AppCheckInit"
 
 private const val RECAPTCHA_SITE_KEY_RES = "recaptcha_site_key"
 
-fun configureAppCheck(context: Context, intent: Intent?) {
-    try {
-        if (FirebaseApp.getApps(context).isEmpty()) {
-            FirebaseApp.initializeApp(context)
-        }
+fun configureAppCheck(context: Context, intent: Intent?): Boolean {
+    val firebaseApp = try {
+        FirebaseApp.initializeApp(context)
+    } catch (e: Exception) {
+        Log.e(TAG, "Failed to initialize the default Firebase app", e)
+        return false
+    }
+    if (firebaseApp == null) {
+        Log.e(TAG, "Default Firebase app configuration is missing")
+        return false
+    }
 
+    try {
         if (BuildConfig.DEBUG) {
             // Implementasi ada di src/debug; build rilis memakai stub di src/release
             // sehingga DebugAppCheckProviderFactory tidak ikut ke APK rilis.
@@ -45,4 +52,5 @@ fun configureAppCheck(context: Context, intent: Intent?) {
     } catch (e: Exception) {
         Log.e(TAG, "Failed to initialize Firebase App Check", e)
     }
+    return true
 }
