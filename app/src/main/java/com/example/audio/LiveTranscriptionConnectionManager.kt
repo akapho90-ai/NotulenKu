@@ -1,6 +1,7 @@
 package com.example.audio
 
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withTimeout
 
@@ -43,6 +44,11 @@ class LiveTranscriptionConnectionManager(
         try {
             withTimeout(operationTimeoutMs) { provider.sendFrame(frame) }
             return true
+        } catch (timeout: TimeoutCancellationException) {
+            disconnectQuietly()
+            onStatus(LiveTranscriptionStatus.DEGRADED, "Pengiriman frame timeout; frame ini tidak dikirim ulang.")
+            connectWithRetries(maxReconnectAttempts)
+            return false
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (failure: Throwable) {
@@ -66,6 +72,16 @@ class LiveTranscriptionConnectionManager(
                 connected = true
                 onStatus(LiveTranscriptionStatus.LIVE, null)
                 return true
+            } catch (timeout: TimeoutCancellationException) {
+                disconnectQuietly()
+                if (attempt >= attempts) {
+                    onStatus(LiveTranscriptionStatus.FALLBACK, "Koneksi provider timeout.")
+                    return false
+                }
+                attempt++
+                onStatus(LiveTranscriptionStatus.DEGRADED, "Koneksi provider timeout.")
+                if (backoff > 0) delay(backoff)
+                backoff = (backoff * 2).coerceAtMost(maxBackoffMs)
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (failure: Throwable) {
