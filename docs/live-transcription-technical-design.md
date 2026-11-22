@@ -38,3 +38,9 @@ Test Android device variations, interruptions, bluetooth routing, headset, backg
 - Verify actual streaming API availability, protocol and auth for each provider to be supported.
 - Select capture strategy and validate microphone resource contention.
 - Add feature flag; default disabled until validated.
+
+
+## Implementation progress (Nov 2026)
+- Added UI-neutral `LiveTranscriptionStatus`, `LiveTranscriptEntry`, and `LiveTranscriptionState` model types.
+- Added `LiveTranscriptRepository` to hold session state and replace provisional entries by stable `windowId`, order by timestamps, and finalize windows.
+- This is foundation code only; no microphone frame capture, provider websocket/streaming connection, or live UI binding is implemented yet. Do not enable or describe this as live transcription in the app until those parts are implemented and validated.
