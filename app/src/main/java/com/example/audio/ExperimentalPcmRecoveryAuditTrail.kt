@@ -30,7 +30,7 @@ class ExperimentalPcmRecoveryAuditTrail(private val sessionRoot:File, private va
             try {
                 temp.writeText((if(log.exists()) log.readText() else "")+line+"
 ")
-                temp.outputStream().use { it.flush() }
+                java.io.RandomAccessFile(temp,"rw").use { it.fd.sync() }
                 if(!temp.renameTo(log)) throw IOException("Audit log gagal difinalisasi.")
             }catch(e:Exception){temp.delete();throw e}
             return event
