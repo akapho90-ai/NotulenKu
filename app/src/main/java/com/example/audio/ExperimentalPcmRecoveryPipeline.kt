@@ -18,6 +18,15 @@ data class PcmRecoveryPipelineResult(
 /** Explicitly-confirmed experimental workflow. It preflights deterministic output collisions and writes its report atomically. */
 class ExperimentalPcmRecoveryPipeline(private val sessionRoot: File) {
     fun run(assessment: ExperimentalPcmRecoveryAssessment, confirmed: Boolean): PcmRecoveryPipelineResult {
+        val id = assessment.metadata?.sessionId
+        if (id == null) {
+            val decision = ExperimentalPcmRecoveryDecisionEngine().decide(assessment)
+            return result(PcmRecoveryPipelineStatus.REJECTED, decision, null, null, null, null, listOf("Metadata tidak tersedia."))
+        }
+        return ExperimentalRecoverySessionLock.withLock(sessionRoot, id) { runLocked(assessment, confirmed) }
+    }
+
+    private fun runLocked(assessment: ExperimentalPcmRecoveryAssessment, confirmed: Boolean): PcmRecoveryPipelineResult {
         val decision=ExperimentalPcmRecoveryDecisionEngine().decide(assessment)
         if(decision.type==PcmRecoveryDecisionType.REJECTED) return result(PcmRecoveryPipelineStatus.REJECTED,decision,null,null,null,null,decision.reasons)
         if(!confirmed) return result(PcmRecoveryPipelineStatus.FAILED,decision,null,null,null,null,listOf("Pipeline membutuhkan konfirmasi pengguna."))
