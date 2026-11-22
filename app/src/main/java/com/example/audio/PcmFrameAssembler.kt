@@ -19,10 +19,12 @@ class PcmFrameAssembler(
 
     private val durationMs = frameDurationMs.toLong()
     private var carry = ByteArray(0)
+    private var sessionStartTimestampMs: Long? = null
     private var sequence = 0L
 
     fun append(bytes: ByteArray, captureTimestampMs: Long): List<LiveAudioFrame> {
         if (bytes.isEmpty()) return emptyList()
+        if (sessionStartTimestampMs == null) sessionStartTimestampMs = captureTimestampMs
         val combined = ByteArray(carry.size + bytes.size)
         carry.copyInto(combined, 0)
         bytes.copyInto(combined, carry.size)
@@ -30,7 +32,7 @@ class PcmFrameAssembler(
         var offset = 0
         while (combined.size - offset >= frameBytes) {
             val frameData = combined.copyOfRange(offset, offset + frameBytes)
-            frames += LiveAudioFrame(sessionId, sequence, captureTimestampMs + sequence * durationMs, frameData)
+            frames += LiveAudioFrame(sessionId, sequence, sessionStartTimestampMs!! + sequence * durationMs, frameData)
             sequence++
             offset += frameBytes
         }
@@ -38,7 +40,7 @@ class PcmFrameAssembler(
         return frames
     }
 
-    fun reset() { carry = ByteArray(0); sequence = 0L }
+    fun reset() { carry = ByteArray(0); sessionStartTimestampMs = null; sequence = 0L }
     val pendingByteCount: Int get() = carry.size
     val nextSequence: Long get() = sequence
 }
