@@ -25,26 +25,22 @@ class ExperimentalPcmSessionJournal(private val directory: File) {
         val file = journalFile(metadata.sessionId)
         val temp = File(directory, file.name + ".tmp")
         temp.writeText(listOf(
-            "session=${metadata.sessionId}",
-            "file=${metadata.fileName}",
-            "sample_rate=${metadata.sampleRateHz}",
-            "format=${metadata.format}",
-            "status=${metadata.status.name}",
-            "checkpoint_bytes=${metadata.checkpointBytes}",
+            "session=${metadata.sessionId}", "file=${metadata.fileName}",
+            "sample_rate=${metadata.sampleRateHz}", "format=${metadata.format}",
+            "status=${metadata.status.name}", "checkpoint_bytes=${metadata.checkpointBytes}",
             "updated_at=${metadata.updatedAtEpochMs}"
-        ).joinToString("\n", postfix="\n"))
+        ).joinToString("\\n", postfix="\\n"))
         if (file.exists() && !file.delete()) { temp.delete(); throw IOException("Tidak dapat mengganti journal PCM.") }
         if (!temp.renameTo(file)) { temp.copyTo(file, overwrite=true); temp.delete() }
     }
 
     fun read(file: File): ExperimentalPcmSessionMetadata? = runCatching {
         val values = file.readLines().mapNotNull { line ->
-            val i = line.indexOf('=')
-            if (i <= 0) null else line.substring(0,i) to line.substring(i+1)
+            val i=line.indexOf('=')
+            if (i<=0) null else line.substring(0,i) to line.substring(i+1)
         }.toMap()
         ExperimentalPcmSessionMetadata(
-            sessionId=values["session"] ?: return null,
-            fileName=values["file"] ?: return null,
+            sessionId=values["session"] ?: return null, fileName=values["file"] ?: return null,
             sampleRateHz=values["sample_rate"]?.toIntOrNull() ?: return null,
             format=values["format"] ?: return null,
             status=ExperimentalPcmSessionStatus.valueOf(values["status"] ?: return null),
@@ -59,43 +55,89 @@ class ExperimentalPcmSessionJournal(private val directory: File) {
 }
 
 data class ExperimentalPcmRecoveryAssessment(
-    val metadata: ExperimentalPcmSessionMetadata?,
-    val pcmFile: File?,
-    val recoverable: Boolean,
-    val reason: String
+    val metadata: ExperimentalPcmSessionMetadata?, val pcmFile: File?,
+    val recoverable: Boolean, val reason: String, val integrity: ExperimentalPcmIntegrityResult? = null
 )
 
-/** Scans experimental sessions only; does not automatically resume capture or mutate files. */
+data class ExperimentalPcmIntegrityResult(
+    val metadataValid: Boolean, val checkpointValid: Boolean, val fileSizeAligned: Boolean,
+    val checkpointMatchesJournal: Boolean, val trustedBytes: Long?, val sha256: String?,
+    val issues: List<String>
+)
+
+/** Read-only checks of metadata, checkpoint consistency, alignment and trusted-byte SHA-256. */
+class ExperimentalPcmIntegrityVerifier(private val directory: File) {
+    fun verify(metadata: ExperimentalPcmSessionMetadata, pcmFile: File): ExperimentalPcmIntegrityResult {
+        val issues=mutableListOf<String>()
+        val expected=File(directory,metadata.fileName).canonicalFile
+        val base=directory.canonicalFile
+        val safePath=expected.parentFile==base
+        if (!safePath) issues += "Path file berada di luar direktori sesi."
+        val metadataValid=metadata.sessionId.isNotBlank() && metadata.sampleRateHz>0 &&
+            metadata.format=="pcm16_mono" && metadata.checkpointBytes>=0 &&
+            metadata.checkpointBytes%2L==0L && safePath && expected==pcmFile.canonicalFile
+        if (!metadataValid) issues += "Metadata sesi tidak valid."
+        val fileExists=pcmFile.isFile
+        if (!fileExists) issues += "File PCM tidak ditemukan."
+        val aligned=fileExists && pcmFile.length()%2L==0L
+        if (fileExists && !aligned) issues += "Ukuran file tidak sejajar PCM16."
+        val checkpointFile=File(directory,pcmFile.name+".checkpoint")
+        val checkpointValues=if(checkpointFile.isFile) checkpointFile.readLines().mapNotNull { line ->
+            val i=line.indexOf('=')
+            if(i<=0) null else line.substring(0,i) to line.substring(i+1)
+        }.toMap() else emptyMap()
+        val checkpointValid=checkpointFile.isFile &&
+            checkpointValues["session"]==metadata.sessionId.replace(Regex("[^A-Za-z0-9_-]"),"_") &&
+            checkpointValues["format"]==metadata.format &&
+            checkpointValues["sample_rate"]==metadata.sampleRateHz.toString() &&
+            checkpointValues["bytes"]?.toLongOrNull()?.let { it>=0 && it<=pcmFile.length() && it%2L==0L }==true
+        if(!checkpointValid) issues += "Checkpoint sidecar hilang atau tidak valid."
+        val checkpointBytes=checkpointValues["bytes"]?.toLongOrNull()
+        val matches=checkpointValid && checkpointBytes==metadata.checkpointBytes
+        if(!matches) issues += "Ukuran checkpoint tidak cocok dengan journal."
+        val trusted=if(matches && metadata.checkpointBytes<=pcmFile.length()) metadata.checkpointBytes else null
+        val hash=trusted?.let { length ->
+            runCatching {
+                val digest=java.security.MessageDigest.getInstance("SHA-256")
+                pcmFile.inputStream().use { input ->
+                    val buffer=ByteArray(8192); var remaining=length
+                    while(remaining>0) {
+                        val read=input.read(buffer,0,minOf(buffer.size.toLong(),remaining).toInt())
+                        if(read<=0) throw java.io.IOException("Data PCM lebih pendek dari trusted byte count.")
+                        digest.update(buffer,0,read); remaining-=read
+                    }
+                }
+                digest.digest().joinToString("") { "%02x".format(it) }
+            }.getOrNull()
+        }
+        if(trusted!=null && hash==null) issues += "Hash SHA-256 tidak berhasil dihitung."
+        return ExperimentalPcmIntegrityResult(metadataValid,checkpointValid,aligned,matches,trusted,hash,issues)
+    }
+}
+
+/** Read-only scanner. No auto-resume, truncation, conversion, or deletion. */
 class ExperimentalPcmRecoveryManager(private val directory: File) {
-    private val journal = ExperimentalPcmSessionJournal(directory)
+    private val journal=ExperimentalPcmSessionJournal(directory)
+    private val verifier=ExperimentalPcmIntegrityVerifier(directory)
 
     fun assessAll(): List<ExperimentalPcmRecoveryAssessment> {
-        val records = journal.list()
-        val assessments = records.map { record ->
-            val file = File(directory, record.fileName)
-            val checkpointFile = File(directory, "${file.name}.checkpoint")
-            val valid = file.exists() && record.format == "pcm16_mono" &&
-                record.sampleRateHz > 0 && record.checkpointBytes >= 0 &&
-                record.checkpointBytes <= file.length() && record.checkpointBytes % 2L == 0L &&
-                record.status != ExperimentalPcmSessionStatus.FINALIZED &&
-                record.status != ExperimentalPcmSessionStatus.FAILED
-            ExperimentalPcmRecoveryAssessment(
-                record, file, valid,
-                when {
-                    !file.exists() -> "File PCM tidak ditemukan."
-                    record.status == ExperimentalPcmSessionStatus.FINALIZED -> "Sesi sudah final."
-                    record.status == ExperimentalPcmSessionStatus.FAILED -> "Sesi ditandai gagal."
-                    record.checkpointBytes > file.length() -> "Checkpoint melebihi ukuran file."
-                    record.checkpointBytes % 2L != 0L -> "Checkpoint tidak sejajar PCM16."
-                    valid -> "Checkpoint dan file memenuhi pemeriksaan dasar; belum diuji untuk pemulihan audio."
-                    else -> "Metadata atau format tidak valid."
-                }
-            )
+        val records=journal.list()
+        val assessments=records.map { record ->
+            val file=File(directory,record.fileName)
+            val integrity=verifier.verify(record,file)
+            val valid=integrity.metadataValid && integrity.checkpointValid && integrity.fileSizeAligned &&
+                integrity.checkpointMatchesJournal && integrity.trustedBytes!=null &&
+                record.status!=ExperimentalPcmSessionStatus.FINALIZED && record.status!=ExperimentalPcmSessionStatus.FAILED
+            ExperimentalPcmRecoveryAssessment(record,file,valid,when {
+                record.status==ExperimentalPcmSessionStatus.FINALIZED -> "Sesi sudah final."
+                record.status==ExperimentalPcmSessionStatus.FAILED -> "Sesi ditandai gagal."
+                valid -> "Pemeriksaan integritas dasar lulus; hash SHA-256 tersedia, belum diuji playback."
+                else -> integrity.issues.joinToString(" ")
+            },integrity)
         }
-        // Include orphan PCM files that have no journal: these are not trusted as recoverable.
-        val known = records.map { it.fileName }.toSet()
-        val orphans = directory.listFiles { f -> f.isFile && f.name.endsWith(".pcm") && f.name !in known }
-            ?.map { f -> ExperimentalPcmRecoveryAssessment(null, f, false, "File PCM tanpa journal; checkpoint tidak dapat dipercaya.") } ?: emptyList()
-        return assessments + orphans
+        val known=records.map { it.fileName }.toSet()
+        val orphans=directory.listFiles { f -> f.isFile && f.name.endsWith(".pcm") && f.name !in known }
+            ?.map { f -> ExperimentalPcmRecoveryAssessment(null,f,false,"File PCM tanpa journal; metadata dan checkpoint tidak dapat dipercaya.") } ?: emptyList()
+        return assessments+orphans
     }
 }
