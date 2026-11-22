@@ -4,6 +4,7 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import kotlinx.coroutines.test.runTest
 
 class LiveTranscriptionBufferTest {
     @Test
@@ -18,5 +19,14 @@ class LiveTranscriptionBufferTest {
         assertEquals(2, buffer.size())
         assertEquals(1L, buffer.poll()?.sequence)
         assertEquals(2L, buffer.poll()?.sequence)
+    }
+    @Test
+    fun suspendingReceiveDecrementsQueueSize() = runTest {
+        val buffer = LiveTranscriptionBuffer(1)
+        val frame = LiveAudioFrame("s", 1, 0, byteArrayOf(1))
+        assertTrue(buffer.offer(frame))
+        assertEquals(1, buffer.size())
+        assertEquals(1L, buffer.receive().sequence)
+        assertEquals(0, buffer.size())
     }
 }
