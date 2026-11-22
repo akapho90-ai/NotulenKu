@@ -57,7 +57,7 @@ class ExperimentalPcmRecoveryExecutor(private val rootDirectory: File) {
             if (integrity.sha256 != null && integrity.sha256 != hash) throw IOException("Hash hasil recovery tidak cocok dengan prefix sumber.")
             val duration = decision.trustedBytes / 2L * 1000L / metadata.sampleRateHz
             FileOutputStream(reportTemp).use { out ->
-                out.write(listOf("session_id=${metadata.sessionId}", "classification=${decision.type}", "source=${source.name}", "output=${output.name}", "copied_bytes=${decision.trustedBytes}", "sample_rate_hz=${metadata.sampleRateHz}", "estimated_duration_ms=$duration", "sha256=$hash", "playback_verified=false", "source_modified=false").joinToString("\\n", postfix="\\n").toByteArray(Charsets.UTF_8))
+                out.write(listOf("session_id=${metadata.sessionId}", "classification=${decision.type}", "source=${source.name}", "output=${output.name}", "copied_bytes=${decision.trustedBytes}", "sample_rate_hz=${metadata.sampleRateHz}", "estimated_duration_ms=$duration", "sha256=$hash", "playback_verified=false", "source_modified=false").joinToString("\n", postfix="\n").toByteArray(Charsets.UTF_8))
                 out.flush()
                 out.fd.sync()
             }
