@@ -33,10 +33,19 @@ android {
       keyPassword = System.getenv("KEY_PASSWORD")
     }
     create("debugConfig") {
-      storeFile = file("${rootDir}/debug.keystore")
-      storePassword = "android"
+      val signingPath = providers.environmentVariable("NOTULENKU_DEBUG_KEYSTORE_PATH").orNull
+      val signingPassword = providers.environmentVariable("NOTULENKU_DEBUG_STORE_PASSWORD")
+      storeFile = file(signingPath ?: "${rootDir}/debug.keystore")
       keyAlias = "androiddebugkey"
-      keyPassword = "android"
+      if (signingPath == null) {
+        storePassword = "android"
+        keyPassword = "android"
+      } else {
+        val password = signingPassword.get()
+        storeType = "PKCS12"
+        storePassword = password
+        keyPassword = password
+      }
     }
   }
 
