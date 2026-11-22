@@ -293,16 +293,52 @@ object AudioSegmenter {
      * into one valid .m4a file using MediaExtractor + MediaMuxer.
      */
     fun mergeM4aSegments(segmentFiles: List<File>, outputFile: File): Result<File> {
-        val validFiles = segmentFiles.filter { it.exists() && it.length() > 256L }
-        if (validFiles.isEmpty()) {
+        val candidates = segmentFiles.filter { it.exists() && it.length() > 256L }
+        if (candidates.isEmpty()) {
             return Result.failure(IllegalStateException("Tidak ada segmen rekaman yang valid untuk digabungkan."))
         }
-        if (validFiles.size == 1) {
-            return runCatching {
-                val single = validFiles.first()
-                if (single.absolutePath != outputFile.absolutePath) {
-                    single.copyTo(outputFile, overwrite = true)
+
+        // Validate each container before selecting the first segment for muxer initialization.
+        // A MediaRecorder.stop() failure can leave a non-empty but unreadable file.
+        val readableFiles = mutableListOf<File>()
+        var trackFormat: MediaFormat? = null
+        var maxBufSize = 256 * 1024
+        for (candidate in candidates) {
+            val probe = MediaExtractor()
+            try {
+                probe.setDataSource(candidate.absolutePath)
+                val trackIndex = findAudioTrackIndex(probe)
+                if (trackIndex >= 0) {
+                    val format = probe.getTrackFormat(trackIndex)
+                    if (trackFormat == null) {
+                        trackFormat = format
+                        maxBufSize = runCatching { format.getInteger(MediaFormat.KEY_MAX_INPUT_SIZE) }
+                            .getOrDefault(256 * 1024)
+                            .coerceIn(64 * 1024, 1024 * 1024)
+                        readableFiles.add(candidate)
+                    } else if (format.getString(MediaFormat.KEY_MIME) == trackFormat!!.getString(MediaFormat.KEY_MIME) &&
+                        runCatching { format.getInteger(MediaFormat.KEY_SAMPLE_RATE) == trackFormat!!.getInteger(MediaFormat.KEY_SAMPLE_RATE) }.getOrDefault(false) &&
+                        runCatching { format.getInteger(MediaFormat.KEY_CHANNEL_COUNT) == trackFormat!!.getInteger(MediaFormat.KEY_CHANNEL_COUNT) }.getOrDefault(false)
+                    ) {
+                        readableFiles.add(candidate)
+                    } else {
+                        Log.w(TAG, "Skipping incompatible audio segment ${candidate.name}")
+                    }
+                } else {
+                    Log.w(TAG, "Skipping segment without audio track: ${candidate.name}")
                 }
+            } catch (probeErr: Exception) {
+                Log.w(TAG, "Skipping unreadable segment ${candidate.name}: ${probeErr.message}")
+            } finally {
+                runCatching { probe.release() }
+            }
+        }
+        val chosenFormat = trackFormat
+            ?: return Result.failure(IllegalStateException("Tidak ditemukan segmen dengan trek audio yang dapat dibaca."))
+        if (readableFiles.size == 1) {
+            return runCatching {
+                val single = readableFiles.first()
+                if (single.absolutePath != outputFile.absolutePath) single.copyTo(outputFile, overwrite = true)
                 outputFile
             }
         }
@@ -310,18 +346,7 @@ object AudioSegmenter {
         var muxer: MediaMuxer? = null
         val tempMerged = File(outputFile.parentFile, "${outputFile.name}.merging")
         return try {
-            val firstExtractor = MediaExtractor()
-            firstExtractor.setDataSource(validFiles.first().absolutePath)
-            val firstTrack = findAudioTrackIndex(firstExtractor)
-            if (firstTrack < 0) {
-                firstExtractor.release()
-                return Result.failure(IllegalStateException("Segmen rekaman pertama tidak memiliki trek audio valid."))
-            }
-            val trackFormat = firstExtractor.getTrackFormat(firstTrack)
-            val maxBufSize = runCatching { trackFormat.getInteger(MediaFormat.KEY_MAX_INPUT_SIZE) }
-                .getOrDefault(256 * 1024)
-                .coerceIn(64 * 1024, 1024 * 1024)
-            firstExtractor.release()
+            val trackFormat = chosenFormat
 
             if (tempMerged.exists()) tempMerged.delete()
             muxer = MediaMuxer(tempMerged.absolutePath, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
@@ -332,7 +357,7 @@ object AudioSegmenter {
             val info = MediaCodec.BufferInfo()
             var globalPtsOffsetUs = 0L
 
-            for (segFile in validFiles) {
+            for (segFile in readableFiles) {
                 val extractor = MediaExtractor()
                 try {
                     extractor.setDataSource(segFile.absolutePath)
