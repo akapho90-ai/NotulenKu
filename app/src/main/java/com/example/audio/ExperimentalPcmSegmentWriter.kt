@@ -4,11 +4,11 @@ import java.io.BufferedOutputStream
 import java.io.File
 import java.io.FileOutputStream
 import java.io.IOException
+import java.io.RandomAccessFile
 
 /**
- * Experimental append-only PCM segment writer.
- * This stores raw PCM16 mono data and a lightweight checkpoint sidecar; it is not
- * a finalized/exportable recording and does not replace the current M4A recorder.
+ * Experimental append-only PCM segment writer with checkpoint-based reopen recovery.
+ * Raw PCM16 mono only; not a finalized recording and not production recovery.
  */
 class ExperimentalPcmSegmentWriter(
     private val directory: File,
@@ -29,22 +29,55 @@ class ExperimentalPcmSegmentWriter(
         require(flushIntervalBytes > 0)
     }
 
+    /**
+     * Reconciles an existing PCM file with its checkpoint before append.
+     * Uncheckpointed bytes are discarded; sample alignment (2-byte PCM16) is enforced.
+     */
     @Synchronized
     fun open(): File {
         if (stream != null) return file
-        if (!directory.exists() && !directory.mkdirs()) {
-            throw IOException("Tidak dapat membuat direktori PCM.")
-        }
+        if (!directory.exists() && !directory.mkdirs()) throw IOException("Tidak dapat membuat direktori PCM.")
+        reconcileExistingFile()
         stream = BufferedOutputStream(FileOutputStream(file, true))
         bytesWritten = file.length()
         writeCheckpoint(force = true)
         return file
     }
 
+    private fun reconcileExistingFile() {
+        if (!file.exists()) {
+            bytesWritten = 0L
+            return
+        }
+        val actual = file.length()
+        var trustedBytes = actual
+        if (checkpoint.exists()) {
+            val values = checkpoint.readLines().mapNotNull { line ->
+                val idx = line.indexOf('=')
+                if (idx <= 0) null else line.substring(0, idx) to line.substring(idx + 1)
+            }.toMap()
+            if (values["session"] != safeSessionId ||
+                values["format"] != "pcm16_mono" ||
+                values["sample_rate"] != sampleRateHz.toString()
+            ) throw IOException("Checkpoint PCM tidak cocok dengan sesi atau format.")
+            val recorded = values["bytes"]?.toLongOrNull()
+                ?: throw IOException("Checkpoint PCM tidak valid.")
+            if (recorded < 0L || recorded > actual) throw IOException("Checkpoint PCM melebihi ukuran file.")
+            trustedBytes = recorded
+        }
+        trustedBytes -= trustedBytes % 2L
+        if (trustedBytes != actual) {
+            RandomAccessFile(file, "rw").use { it.setLength(trustedBytes) }
+        }
+        bytesWritten = trustedBytes
+    }
+
     @Synchronized
     fun append(pcm: ByteArray) {
         if (stream == null) open()
         if (pcm.isEmpty()) return
+        // Keep each write sample-aligned. Caller normally delivers aligned frames.
+        if (pcm.size % 2 != 0) throw IOException("Frame PCM16 memiliki jumlah byte ganjil.")
         stream!!.write(pcm)
         bytesWritten += pcm.size
         bytesSinceFlush += pcm.size
@@ -52,13 +85,10 @@ class ExperimentalPcmSegmentWriter(
     }
 
     private fun writeCheckpoint(force: Boolean) {
-        val out = stream
-        if (out != null) out.flush()
+        stream?.flush()
         if (force || bytesSinceFlush >= flushIntervalBytes) {
             val temp = File(directory, checkpoint.name + ".tmp")
-            temp.writeText(
-                "session=$safeSessionId\nformat=pcm16_mono\nsample_rate=$sampleRateHz\nbytes=$bytesWritten\n"
-            )
+            temp.writeText("session=$safeSessionId\nformat=pcm16_mono\nsample_rate=$sampleRateHz\nbytes=$bytesWritten\n")
             if (checkpoint.exists() && !checkpoint.delete()) {
                 temp.delete()
                 throw IOException("Tidak dapat mengganti checkpoint PCM.")
