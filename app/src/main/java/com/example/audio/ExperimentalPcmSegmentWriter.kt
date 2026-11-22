@@ -19,9 +19,11 @@ class ExperimentalPcmSegmentWriter(
     private val safeSessionId = sessionId.replace(Regex("[^A-Za-z0-9_-]"), "_")
     private val file = File(directory, "$safeSessionId.pcm")
     private val checkpoint = File(directory, "$safeSessionId.pcm.checkpoint")
+    private var rawStream: FileOutputStream? = null
     private var stream: BufferedOutputStream? = null
     private var bytesWritten = 0L
     private var bytesSinceFlush = 0
+    private var failed = false
     private val journal = ExperimentalPcmSessionJournal(directory)
 
     init {
@@ -30,27 +32,27 @@ class ExperimentalPcmSegmentWriter(
         require(flushIntervalBytes > 0)
     }
 
-    /**
-     * Reconciles an existing PCM file with its checkpoint before append.
-     * Uncheckpointed bytes are discarded; sample alignment (2-byte PCM16) is enforced.
-     */
     @Synchronized
     fun open(): File {
+        if (failed) throw IOException("Writer PCM sudah berada pada status FAILED.")
         if (stream != null) return file
         if (!directory.exists() && !directory.mkdirs()) throw IOException("Tidak dapat membuat direktori PCM.")
         reconcileExistingFile()
-        stream = BufferedOutputStream(FileOutputStream(file, true))
+        rawStream = FileOutputStream(file, true)
+        stream = BufferedOutputStream(rawStream!!)
         bytesWritten = file.length()
-        writeCheckpoint(force = true)
-        journal.write(metadata(ExperimentalPcmSessionStatus.RECORDING))
+        try {
+            writeCheckpoint(force = true)
+            journal.write(metadata(ExperimentalPcmSessionStatus.RECORDING))
+        } catch (e: Exception) {
+            failWriter(e)
+            throw e
+        }
         return file
     }
 
     private fun reconcileExistingFile() {
-        if (!file.exists()) {
-            bytesWritten = 0L
-            return
-        }
+        if (!file.exists()) { bytesWritten = 0L; return }
         val actual = file.length()
         var trustedBytes = actual
         if (checkpoint.exists()) {
@@ -69,51 +71,92 @@ class ExperimentalPcmSegmentWriter(
         }
         trustedBytes -= trustedBytes % 2L
         if (trustedBytes != actual) {
-            RandomAccessFile(file, "rw").use { it.setLength(trustedBytes) }
+            RandomAccessFile(file, "rw").use { it.setLength(trustedBytes); it.fd.sync() }
         }
         bytesWritten = trustedBytes
     }
 
     @Synchronized
     fun append(pcm: ByteArray) {
+        if (failed) throw IOException("Writer PCM gagal; append dihentikan.")
         if (stream == null) open()
         if (pcm.isEmpty()) return
-        // Keep each write sample-aligned. Caller normally delivers aligned frames.
         if (pcm.size % 2 != 0) throw IOException("Frame PCM16 memiliki jumlah byte ganjil.")
-        stream!!.write(pcm)
-        bytesWritten += pcm.size
-        bytesSinceFlush += pcm.size
-        if (bytesSinceFlush >= flushIntervalBytes) writeCheckpoint(force = false)
+        try {
+            stream!!.write(pcm)
+            bytesWritten += pcm.size
+            bytesSinceFlush += pcm.size
+            if (bytesSinceFlush >= flushIntervalBytes) writeCheckpoint(force = false)
+        } catch (e: Exception) {
+            failWriter(e)
+            throw e
+        }
     }
 
     private fun writeCheckpoint(force: Boolean) {
         stream?.flush()
+        rawStream?.fd?.sync()
         if (force || bytesSinceFlush >= flushIntervalBytes) {
-            val temp = File(directory, checkpoint.name + ".tmp")
-            temp.writeText("session=$safeSessionId\nformat=pcm16_mono\nsample_rate=$sampleRateHz\nbytes=$bytesWritten\n")
-            if (checkpoint.exists() && !checkpoint.delete()) {
-                temp.delete()
-                throw IOException("Tidak dapat mengganti checkpoint PCM.")
-            }
-            if (!temp.renameTo(checkpoint)) {
-                temp.copyTo(checkpoint, overwrite = true)
-                temp.delete()
-            }
+            val text = "session=$safeSessionId\nformat=pcm16_mono\nsample_rate=$sampleRateHz\nbytes=$bytesWritten\n"
+            atomicReplace(checkpoint, text)
             bytesSinceFlush = 0
             journal.write(metadata(ExperimentalPcmSessionStatus.RECORDING))
         }
     }
 
+    private fun atomicReplace(target: File, text: String) {
+        val temp = File(directory, target.name + ".tmp")
+        val backup = File(directory, target.name + ".bak")
+        try {
+            FileOutputStream(temp).use { out ->
+                out.write(text.toByteArray(Charsets.UTF_8))
+                out.flush()
+                out.fd.sync()
+            }
+            // Retain the previous valid file until the new candidate is verified.
+            if (backup.exists() && !backup.delete()) throw IOException("Tidak dapat membersihkan backup metadata.")
+            if (target.exists() && !target.renameTo(backup)) throw IOException("Tidak dapat menyimpan backup metadata.")
+            if (!temp.renameTo(target)) {
+                if (backup.exists()) backup.renameTo(target)
+                throw IOException("Tidak dapat mempromosikan metadata baru.")
+            }
+            if (target.readText(Charsets.UTF_8) != text) {
+                target.delete()
+                if (backup.exists()) backup.renameTo(target)
+                throw IOException("Verifikasi metadata hasil penggantian gagal.")
+            }
+            if (backup.exists() && !backup.delete()) backup.deleteOnExit()
+        } finally {
+            if (temp.exists()) temp.delete()
+        }
+    }
+
+    private fun failWriter(cause: Throwable) {
+        failed = true
+        runCatching { stream?.flush() }
+        runCatching { rawStream?.fd?.sync() }
+        runCatching { stream?.close() }
+        stream = null
+        rawStream = null
+        runCatching { journal.write(metadata(ExperimentalPcmSessionStatus.FAILED)) }
+    }
+
     @Synchronized
     override fun close() {
         val out = stream ?: return
+        if (failed) { runCatching { out.close() }; stream = null; rawStream = null; return }
         try {
             out.flush()
+            rawStream?.fd?.sync()
             writeCheckpoint(force = true)
             journal.write(metadata(ExperimentalPcmSessionStatus.RECOVERABLE))
+        } catch (e: Exception) {
+            failWriter(e)
+            throw e
         } finally {
             runCatching { out.close() }
             stream = null
+            rawStream = null
         }
     }
 
@@ -121,5 +164,7 @@ class ExperimentalPcmSegmentWriter(
         sessionId = sessionId, fileName = file.name, sampleRateHz = sampleRateHz,
         status = status, checkpointBytes = bytesWritten, updatedAtEpochMs = System.currentTimeMillis()
     )
-\n    val currentFile: File get() = file\n    val totalBytes: Long get() = bytesWritten
+
+    val currentFile: File get() = file
+    val totalBytes: Long get() = bytesWritten
 }
