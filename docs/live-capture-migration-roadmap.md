@@ -52,3 +52,7 @@ Do not run AudioRecord concurrently with MediaRecorder for the same microphone u
 - Original audio remains available when STT fails.
 - Live latency measured on actual supported provider/device configurations.
 - All claims of streaming are based on verified provider protocol and end-to-end device testing.
+
+
+## Experimental PCM session journal and assessment
+An isolated sidecar journal now records PCM session metadata and checkpoint bytes, and a read-only recovery scanner assesses journaled and orphan PCM files. Assessment is intentionally conservative and does not automatically resume, mutate or delete files. See `docs/experimental-pcm-session-journal-recovery.md`. This is metadata-level assessment only, not verified audio recovery.
