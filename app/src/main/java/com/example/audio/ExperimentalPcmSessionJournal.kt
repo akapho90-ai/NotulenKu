@@ -2,6 +2,7 @@ package com.example.audio
 
 import java.io.File
 import java.io.IOException
+import java.io.FileOutputStream
 
 enum class ExperimentalPcmSessionStatus { RECORDING, RECOVERABLE, FINALIZED, FAILED }
 
@@ -24,14 +25,30 @@ class ExperimentalPcmSessionJournal(private val directory: File) {
         if (!directory.exists() && !directory.mkdirs()) throw IOException("Tidak dapat membuat direktori journal PCM.")
         val file = journalFile(metadata.sessionId)
         val temp = File(directory, file.name + ".tmp")
-        temp.writeText(listOf(
+        val content = listOf(
             "session=${metadata.sessionId}", "file=${metadata.fileName}",
             "sample_rate=${metadata.sampleRateHz}", "format=${metadata.format}",
             "status=${metadata.status.name}", "checkpoint_bytes=${metadata.checkpointBytes}",
             "updated_at=${metadata.updatedAtEpochMs}"
-        ).joinToString("\n", postfix="\n"))
-        if (file.exists() && !file.delete()) { temp.delete(); throw IOException("Tidak dapat mengganti journal PCM.") }
-        if (!temp.renameTo(file)) { temp.copyTo(file, overwrite=true); temp.delete() }
+        ).joinToString("\\n", postfix="\\n")
+        FileOutputStream(temp).use { out ->
+            out.write(content.toByteArray(Charsets.UTF_8))
+            out.flush()
+            out.fd.sync()
+        }
+        val backup = File(directory, file.name + ".bak")
+        if (backup.exists() && !backup.delete()) { temp.delete(); throw IOException("Tidak dapat membersihkan backup journal.") }
+        if (file.exists() && !file.renameTo(backup)) { temp.delete(); throw IOException("Tidak dapat menyimpan backup journal.") }
+        if (!temp.renameTo(file)) {
+            if (backup.exists()) backup.renameTo(file)
+            throw IOException("Tidak dapat mempromosikan journal PCM.")
+        }
+        if (file.readText(Charsets.UTF_8) != content) {
+            file.delete()
+            if (backup.exists()) backup.renameTo(file)
+            throw IOException("Verifikasi journal hasil penggantian gagal.")
+        }
+        if (backup.exists() && !backup.delete()) backup.deleteOnExit()
     }
 
     fun read(file: File): ExperimentalPcmSessionMetadata? = runCatching {
