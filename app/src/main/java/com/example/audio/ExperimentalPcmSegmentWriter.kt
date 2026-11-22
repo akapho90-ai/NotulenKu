@@ -117,5 +117,9 @@ class ExperimentalPcmSegmentWriter(
         }
     }
 
-    private fun metadata(status: ExperimentalPcmSessionStatus) = ExperimentalPcmSessionMetadata(\n        sessionId = sessionId, fileName = file.name, sampleRateHz = sampleRateHz,\n        status = status, checkpointBytes = bytesWritten, updatedAtEpochMs = System.currentTimeMillis()\n    )\n\n    val currentFile: File get() = file\n    val totalBytes: Long get() = bytesWritten
+    private fun metadata(status: ExperimentalPcmSessionStatus) = ExperimentalPcmSessionMetadata(
+        sessionId = sessionId, fileName = file.name, sampleRateHz = sampleRateHz,
+        status = status, checkpointBytes = bytesWritten, updatedAtEpochMs = System.currentTimeMillis()
+    )
+\n    val currentFile: File get() = file\n    val totalBytes: Long get() = bytesWritten
 }
