@@ -36,6 +36,8 @@ object LiveTranscriptRepository {
         if (_state.value.sessionId != sessionId || entry.text.isBlank()) return
         val current = _state.value.entries
         val existingIndex = current.indexOfFirst { it.windowId == entry.windowId }
+        // Ignore late provisional updates once a window has been committed.
+        if (existingIndex >= 0 && current[existingIndex].isFinal && !entry.isFinal) return
         val updated = if (existingIndex >= 0) {
             current.toMutableList().apply { set(existingIndex, entry) }
         } else {
