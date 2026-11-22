@@ -1,6 +1,0 @@
-{
-  "name": "AI Notulen Rapat",
-  "description": "Aplikasi pencatat rapat cerdas multi-organisasi dengan rekam audio, transkrip, notulen AI, tanya jawab, dan infografis visual.",
-  "requestFramePermissions": [],
-  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
-}
