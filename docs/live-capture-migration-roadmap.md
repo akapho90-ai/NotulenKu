@@ -6,7 +6,7 @@ Enable live transcription while retaining a reliable original recording and the 
 ## Current constraint
 MeetingRecordingService uses MediaRecorder to write AAC/M4A segments and relies on journaled segment paths for recovery. MediaRecorder does not provide the PCM frame stream needed by a streaming STT client. Adding a second microphone reader is not a safe assumption: Android audio capture arbitration and OEM behavior must be tested.
 
-## Proposed controlled migration
+## Experimental orchestration added\n`ExperimentalLiveCaptureSession` now orchestrates the existing experimental AudioRecord engine, bounded live-transcription adapter and worker in a standalone class. It is not wired into `MeetingRecordingService` and does not persist PCM audio. This is a plumbing prototype only, not a safe production recording path. If capture startup fails, the transcription worker is stopped. Capture errors are surfaced to the experimental session status callback.\n\n## Proposed controlled migration
 ### Stage A — Instrument and establish invariants
 - Keep current MediaRecorder path untouched.
 - Record device/API, audio route, recorder start/stop failures and segment validation diagnostics (avoid audio content or secrets in logs).
