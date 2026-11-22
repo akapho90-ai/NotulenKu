@@ -293,94 +293,80 @@ object AudioSegmenter {
      * into one valid .m4a file using MediaExtractor + MediaMuxer.
      */
     fun mergeM4aSegments(segmentFiles: List<File>, outputFile: File): Result<File> {
-        val candidates = segmentFiles.filter { it.exists() && it.length() > 256L }
-        if (candidates.isEmpty()) {
-            return Result.failure(IllegalStateException("Tidak ada segmen rekaman yang valid untuk digabungkan."))
+        if (segmentFiles.isEmpty()) return Result.failure(IllegalStateException("Tidak ada segmen rekaman untuk digabungkan."))
+        // Fail closed: never silently omit requested recording parts.
+        val candidates = segmentFiles
+        for (file in candidates) {
+            if (!file.exists() || file.length() <= 256L || !isReadableAudioFile(file)) {
+                return Result.failure(IllegalStateException("Segmen audio tidak valid atau hilang: ${file.name}"))
+            }
         }
 
-        // Validate each container before selecting the first segment for muxer initialization.
-        // A MediaRecorder.stop() failure can leave a non-empty but unreadable file.
-        val readableFiles = mutableListOf<File>()
-        var trackFormat: MediaFormat? = null
+        var chosenFormat: MediaFormat? = null
         var maxBufSize = 256 * 1024
         for (candidate in candidates) {
             val probe = MediaExtractor()
             try {
                 probe.setDataSource(candidate.absolutePath)
                 val trackIndex = findAudioTrackIndex(probe)
-                if (trackIndex >= 0) {
-                    val format = probe.getTrackFormat(trackIndex)
-                    if (trackFormat == null) {
-                        trackFormat = format
-                        maxBufSize = runCatching { format.getInteger(MediaFormat.KEY_MAX_INPUT_SIZE) }
-                            .getOrDefault(256 * 1024)
-                            .coerceIn(64 * 1024, 1024 * 1024)
-                        readableFiles.add(candidate)
-                    } else if (format.getString(MediaFormat.KEY_MIME) == trackFormat!!.getString(MediaFormat.KEY_MIME) &&
-                        runCatching { format.getInteger(MediaFormat.KEY_SAMPLE_RATE) == trackFormat!!.getInteger(MediaFormat.KEY_SAMPLE_RATE) }.getOrDefault(false) &&
-                        runCatching { format.getInteger(MediaFormat.KEY_CHANNEL_COUNT) == trackFormat!!.getInteger(MediaFormat.KEY_CHANNEL_COUNT) }.getOrDefault(false)
-                    ) {
-                        readableFiles.add(candidate)
-                    } else {
-                        Log.w(TAG, "Skipping incompatible audio segment ${candidate.name}")
-                    }
-                } else {
-                    Log.w(TAG, "Skipping segment without audio track: ${candidate.name}")
+                if (trackIndex < 0) throw IllegalStateException("Segmen tidak memiliki trek audio: ${candidate.name}")
+                val format = probe.getTrackFormat(trackIndex)
+                if (chosenFormat == null) {
+                    chosenFormat = format
+                    maxBufSize = runCatching { format.getInteger(MediaFormat.KEY_MAX_INPUT_SIZE) }
+                        .getOrDefault(256 * 1024).coerceIn(64 * 1024, 1024 * 1024)
+                } else if (format.getString(MediaFormat.KEY_MIME) != chosenFormat!!.getString(MediaFormat.KEY_MIME) ||
+                    runCatching { format.getInteger(MediaFormat.KEY_SAMPLE_RATE) != chosenFormat!!.getInteger(MediaFormat.KEY_SAMPLE_RATE) }.getOrDefault(true) ||
+                    runCatching { format.getInteger(MediaFormat.KEY_CHANNEL_COUNT) != chosenFormat!!.getInteger(MediaFormat.KEY_CHANNEL_COUNT) }.getOrDefault(true)
+                ) {
+                    throw IllegalStateException("Format segmen tidak kompatibel: ${candidate.name}")
                 }
-            } catch (probeErr: Exception) {
-                Log.w(TAG, "Skipping unreadable segment ${candidate.name}: ${probeErr.message}")
+            } catch (e: Exception) {
+                return Result.failure(e)
             } finally {
                 runCatching { probe.release() }
             }
         }
-        val chosenFormat = trackFormat
-            ?: return Result.failure(IllegalStateException("Tidak ditemukan segmen dengan trek audio yang dapat dibaca."))
-        if (readableFiles.size == 1) {
-            return runCatching {
-                val single = readableFiles.first()
-                if (single.absolutePath != outputFile.absolutePath) {
-                    val copyTemp = File(outputFile.parentFile, "${outputFile.name}.recovering")
-                    single.copyTo(copyTemp, overwrite = true)
-                    if (!isReadableAudioFile(copyTemp)) {
-                        copyTemp.delete()
-                        throw IllegalStateException("Salinan segmen tunggal tidak lolos validasi audio.")
-                    }
-                    if (outputFile.exists()) outputFile.delete()
-                    if (!copyTemp.renameTo(outputFile)) {
-                        copyTemp.copyTo(outputFile, overwrite = true)
-                        copyTemp.delete()
-                    }
-                } else if (!isReadableAudioFile(single)) {
-                    throw IllegalStateException("Segmen tunggal tidak lolos validasi audio.")
-                }
-                outputFile
+
+        if (candidates.size == 1) {
+            val single = candidates.first()
+            if (single.absolutePath == outputFile.absolutePath) return Result.success(single)
+            val staged = File(outputFile.parentFile, "${outputFile.name}.staged")
+            return try {
+                staged.delete()
+                single.copyTo(staged, overwrite = true)
+                if (!isReadableAudioFile(staged)) throw IllegalStateException("Salinan audio tidak lolos validasi.")
+                promoteValidatedAudio(staged, outputFile)
+                Result.success(outputFile)
+            } catch (e: Exception) {
+                runCatching { staged.delete() }
+                Result.failure(e)
             }
         }
 
-        var muxer: MediaMuxer? = null
+        val format = chosenFormat ?: return Result.failure(IllegalStateException("Format audio tidak tersedia."))
         val tempMerged = File(outputFile.parentFile, "${outputFile.name}.merging")
+        var muxer: MediaMuxer? = null
         return try {
-            val trackFormat = chosenFormat
-
-            if (tempMerged.exists()) tempMerged.delete()
+            tempMerged.delete()
             muxer = MediaMuxer(tempMerged.absolutePath, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
-            val muxTrackIdx = muxer.addTrack(trackFormat)
+            val muxTrackIdx = muxer.addTrack(format)
             muxer.start()
-
             val buffer = ByteBuffer.allocate(maxBufSize)
             val info = MediaCodec.BufferInfo()
             var globalPtsOffsetUs = 0L
+            var totalSamplesWritten = 0L
 
-            for (segFile in readableFiles) {
+            for (segFile in candidates) {
                 val extractor = MediaExtractor()
                 try {
                     extractor.setDataSource(segFile.absolutePath)
                     val trackIdx = findAudioTrackIndex(extractor)
-                    if (trackIdx < 0) continue
+                    if (trackIdx < 0) throw IllegalStateException("Trek audio hilang pada ${segFile.name}")
                     extractor.selectTrack(trackIdx)
-
                     var segBasePtsUs = -1L
                     var lastSegPtsUs = 0L
+                    var segmentSamples = 0L
                     while (true) {
                         info.offset = 0
                         info.size = extractor.readSampleData(buffer, 0)
@@ -392,36 +378,56 @@ object AudioSegmenter {
                         info.flags = extractor.sampleFlags
                         muxer.writeSampleData(muxTrackIdx, buffer, info)
                         lastSegPtsUs = relUs
+                        segmentSamples++
                         extractor.advance()
                     }
-                    // Add ~64ms AAC frame spacing between segments to keep timestamps strictly monotonic
+                    if (segmentSamples == 0L) throw IllegalStateException("Segmen kosong saat dibaca: ${segFile.name}")
+                    totalSamplesWritten += segmentSamples
                     globalPtsOffsetUs += lastSegPtsUs + 64_000L
-                } catch (segErr: Exception) {
-                    Log.w(TAG, "Skipping unreadable segment ${segFile.name} during merge: ${segErr.message}")
                 } finally {
-                    runCatching { extractor.release() }
+                    extractor.release()
                 }
             }
 
             muxer.stop()
             muxer.release()
             muxer = null
-
-            if (!tempMerged.exists() || tempMerged.length() <= 256L || !isReadableAudioFile(tempMerged)) {
-                runCatching { tempMerged.delete() }
-                return Result.failure(IllegalStateException("Hasil penggabungan audio gagal validasi atau kosong."))
-            }
-            if (outputFile.exists()) outputFile.delete()
-            if (!tempMerged.renameTo(outputFile)) {
-                tempMerged.copyTo(outputFile, overwrite = true)
-                tempMerged.delete()
-            }
+            if (totalSamplesWritten == 0L || !isReadableAudioFile(tempMerged)) throw IllegalStateException("Hasil merge tidak lolos validasi audio.")
+            promoteValidatedAudio(tempMerged, outputFile)
+            if (!isReadableAudioFile(outputFile)) throw IllegalStateException("File final gagal validasi setelah promosi.")
             Result.success(outputFile)
         } catch (e: Exception) {
-            Log.e(TAG, "Failed merging recording segments", e)
+            Log.e(TAG, "Merge failed; source segments preserved", e)
             runCatching { muxer?.release() }
-            runCatching { if (tempMerged.exists()) tempMerged.delete() }
+            runCatching { tempMerged.delete() }
             Result.failure(e)
+        }
+    }
+
+    /** Staged promotion with backup/restore attempt and validation after final placement. */
+    private fun promoteValidatedAudio(staged: File, destination: File) {
+        if (!isReadableAudioFile(staged)) throw IllegalStateException("File staged tidak valid.")
+        val backup = File(destination.parentFile, "${destination.name}.backup")
+        if (backup.exists() && !backup.delete()) throw IllegalStateException("Tidak dapat membersihkan backup audio.")
+        val hadDestination = destination.exists()
+        if (hadDestination && !destination.renameTo(backup)) {
+            destination.copyTo(backup, overwrite = true)
+            if (!isReadableAudioFile(backup)) throw IllegalStateException("Backup file lama gagal validasi.")
+        }
+        try {
+            if (destination.exists() && !destination.delete()) throw IllegalStateException("Tidak dapat mengosongkan tujuan.")
+            if (!staged.renameTo(destination)) {
+                staged.copyTo(destination, overwrite = true)
+                staged.delete()
+            }
+            if (!isReadableAudioFile(destination)) throw IllegalStateException("File promoted gagal validasi.")
+            runCatching { backup.delete() }
+        } catch (e: Exception) {
+            runCatching { destination.delete() }
+            if (hadDestination && backup.exists()) {
+                if (!backup.renameTo(destination)) runCatching { backup.copyTo(destination, overwrite = true) }
+            }
+            throw e
         }
     }
 
