@@ -44,3 +44,10 @@ Test Android device variations, interruptions, bluetooth routing, headset, backg
 - Added UI-neutral `LiveTranscriptionStatus`, `LiveTranscriptEntry`, and `LiveTranscriptionState` model types.
 - Added `LiveTranscriptRepository` to hold session state and replace provisional entries by stable `windowId`, order by timestamps, and finalize windows.
 - This is foundation code only; no microphone frame capture, provider websocket/streaming connection, or live UI binding is implemented yet. Do not enable or describe this as live transcription in the app until those parts are implemented and validated.
+
+
+## Provider boundary and queue foundation progress
+- Added provider-neutral interface and mode enum (`STREAMING`, `WINDOWED_BATCH`, `BATCH_ONLY`), frame envelope, and callback contract.
+- Added bounded in-memory audio-frame queue with FIFO operations and explicit offer rejection when full.
+- Added unit test for capacity and FIFO behavior.
+- Still not connected to capture: the existing `MediaRecorder` and potential `AudioRecord` capture coexistence is device/API-sensitive, and simultaneous mic capture can be restricted or produce silenced capture. This must be device-validated before selecting the capture architecture.
