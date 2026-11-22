@@ -338,7 +338,21 @@ object AudioSegmenter {
         if (readableFiles.size == 1) {
             return runCatching {
                 val single = readableFiles.first()
-                if (single.absolutePath != outputFile.absolutePath) single.copyTo(outputFile, overwrite = true)
+                if (single.absolutePath != outputFile.absolutePath) {
+                    val copyTemp = File(outputFile.parentFile, "${outputFile.name}.recovering")
+                    single.copyTo(copyTemp, overwrite = true)
+                    if (!isReadableAudioFile(copyTemp)) {
+                        copyTemp.delete()
+                        throw IllegalStateException("Salinan segmen tunggal tidak lolos validasi audio.")
+                    }
+                    if (outputFile.exists()) outputFile.delete()
+                    if (!copyTemp.renameTo(outputFile)) {
+                        copyTemp.copyTo(outputFile, overwrite = true)
+                        copyTemp.delete()
+                    }
+                } else if (!isReadableAudioFile(single)) {
+                    throw IllegalStateException("Segmen tunggal tidak lolos validasi audio.")
+                }
                 outputFile
             }
         }
@@ -393,8 +407,9 @@ object AudioSegmenter {
             muxer.release()
             muxer = null
 
-            if (!tempMerged.exists() || tempMerged.length() <= 256L) {
-                return Result.failure(IllegalStateException("Hasil penggabungan audio kosong."))
+            if (!tempMerged.exists() || tempMerged.length() <= 256L || !isReadableAudioFile(tempMerged)) {
+                runCatching { tempMerged.delete() }
+                return Result.failure(IllegalStateException("Hasil penggabungan audio gagal validasi atau kosong."))
             }
             if (outputFile.exists()) outputFile.delete()
             if (!tempMerged.renameTo(outputFile)) {
@@ -407,6 +422,28 @@ object AudioSegmenter {
             runCatching { muxer?.release() }
             runCatching { if (tempMerged.exists()) tempMerged.delete() }
             Result.failure(e)
+        }
+    }
+
+    /**
+     * Validates a file by opening its container and confirming a readable audio track
+     * with at least one sample. This is intentionally stricter than checking file size.
+     */
+    fun isReadableAudioFile(file: File): Boolean {
+        if (!file.exists() || file.length() <= 256L) return false
+        val extractor = MediaExtractor()
+        return try {
+            extractor.setDataSource(file.absolutePath)
+            val trackIndex = findAudioTrackIndex(extractor)
+            if (trackIndex < 0) return false
+            extractor.selectTrack(trackIndex)
+            val buffer = ByteBuffer.allocate(64 * 1024)
+            extractor.readSampleData(buffer, 0) > 0
+        } catch (e: Exception) {
+            Log.w(TAG, "Audio validation failed for ${file.name}: ${e.message}")
+            false
+        } finally {
+            runCatching { extractor.release() }
         }
     }
 
