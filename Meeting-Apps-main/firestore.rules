@@ -1,0 +1,445 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Global safety net
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // --- Primitive Helpers ---
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isBootstrappedAdmin() {
+      return isSignedIn() &&
+             request.auth.token.email == 'gamecuan.1901@gmail.com' &&
+             request.auth.token.email_verified == true;
+    }
+
+    function tenantDoc(tenantId) {
+      return get(/databases/$(database)/documents/tenants/$(tenantId));
+    }
+
+    function isTenantMember(tenantId) {
+      return isSignedIn() &&
+             exists(/databases/$(database)/documents/tenants/$(tenantId)) &&
+             request.auth.uid in tenantDoc(tenantId).data.memberUids;
+    }
+
+    function isTenantAdmin(tenantId) {
+      return isSignedIn() && (
+        isBootstrappedAdmin() ||
+        (exists(/databases/$(database)/documents/tenants/$(tenantId)) &&
+         request.auth.uid in tenantDoc(tenantId).data.adminUids)
+      );
+    }
+
+    // --- Validation Helpers ---
+    function isValidUserProfile(data) {
+      return data.userId is string && data.userId.size() >= 1 && data.userId.size() <= 128 &&
+             data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 100 &&
+             (!('username' in data) || (data.username is string && data.username.size() >= 3 && data.username.size() <= 20 && data.username.matches('^[a-z0-9._]+$'))) &&
+             data.email is string && data.email.size() <= 200 &&
+             (!('photoUrl' in data) || (data.photoUrl is string && data.photoUrl.size() <= 500)) &&
+             (!('activeTenantId' in data) || (data.activeTenantId is string && data.activeTenantId.size() <= 128)) &&
+             data.createdAt is timestamp && data.createdAt <= request.time &&
+             data.updatedAt is timestamp && data.updatedAt <= request.time;
+    }
+
+    function isValidTenant(data) {
+      return data.name is string && data.name.size() >= 1 && data.name.size() <= 100 &&
+             data.slug is string && data.slug.size() >= 1 && data.slug.size() <= 120 &&
+             data.ownerId is string && data.ownerId.size() >= 1 && data.ownerId.size() <= 128 &&
+             data.memberUids is list && data.memberUids.size() >= 1 && data.memberUids.size() <= 50 &&
+             data.adminUids is list && data.adminUids.size() >= 1 && data.adminUids.size() <= 20 &&
+             data.ownerId in data.memberUids &&
+             data.ownerId in data.adminUids &&
+             data.aiMode in ['platform', 'byok'] &&
+             data.watermarkEnabled is bool &&
+             data.maxFileMb is int && data.maxFileMb >= 5 && data.maxFileMb <= 500 &&
+             data.retentionDays is int && data.retentionDays >= 0 && data.retentionDays <= 3650 &&
+             data.monthlyBudgetUsd is number && data.monthlyBudgetUsd >= 0 && data.monthlyBudgetUsd <= 100000 &&
+             data.status in ['active', 'suspended'] &&
+             data.createdAt is timestamp && data.createdAt <= request.time &&
+             data.updatedAt is timestamp && data.updatedAt <= request.time;
+    }
+
+    function isValidTenantMember(data, tenantId, memberUid) {
+      return data.userId == memberUid &&
+             data.tenantId == tenantId &&
+             data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 100 &&
+             data.email is string && data.email.size() <= 200 &&
+             data.role in ['owner', 'admin', 'member'] &&
+             data.memberStatus in ['active', 'disabled'] &&
+             data.memberUids is list && data.memberUids.size() >= 1 && data.memberUids.size() <= 50 &&
+             (data.memberUids[0] is string) &&
+             data.createdAt is timestamp && data.createdAt <= request.time &&
+             data.updatedAt is timestamp && data.updatedAt <= request.time;
+    }
+
+    function isValidMeeting(data, tenantId) {
+      return data.tenantId == tenantId &&
+             data.userId is string && data.userId.size() >= 1 && data.userId.size() <= 128 &&
+             data.ownerName is string && data.ownerName.size() <= 100 &&
+             data.judul is string && data.judul.size() >= 1 && data.judul.size() <= 200 &&
+             data.status in ['uploaded', 'transcribing', 'summarizing', 'done', 'error'] &&
+             (!('errorMessage' in data) || (data.errorMessage is string && data.errorMessage.size() <= 500)) &&
+             data.durasiDetik is int && data.durasiDetik >= 0 && data.durasiDetik <= 86400 &&
+             data.ukuranBytes is int && data.ukuranBytes >= 0 && data.ukuranBytes <= 600000000 &&
+             (!('localAudioPath' in data) || (data.localAudioPath is string && data.localAudioPath.size() <= 500)) &&
+             data.consentRecordedAt is timestamp && data.consentRecordedAt <= request.time &&
+             data.visibleToUids is list && data.visibleToUids.size() >= 1 && data.visibleToUids.size() <= 50 &&
+             (data.visibleToUids[0] is string) &&
+             data.sharedWithAll is bool &&
+             data.bahasa is string && data.bahasa.size() >= 1 && data.bahasa.size() <= 20 &&
+             data.transcriptText is string && data.transcriptText.size() <= 300000 &&
+             data.segments is list && data.segments.size() <= 1500 &&
+             data.ringkasan is string && data.ringkasan.size() <= 20000 &&
+             data.poinUtama is list && data.poinUtama.size() <= 100 &&
+             data.keputusan is list && data.keputusan.size() <= 100 &&
+             data.risiko is list && data.risiko.size() <= 100 &&
+             data.angkaKunci is list && data.angkaKunci.size() <= 50 &&
+             data.actionItems is list && data.actionItems.size() <= 200 &&
+             (!('analysis' in data) || data.analysis is map) &&
+             (!('visualData' in data) || data.visualData is map) &&
+             (!('modelInfo' in data) || data.modelInfo is map) &&
+             (!('isFavorite' in data) || data.isFavorite is bool) &&
+             (!('tags' in data) || (data.tags is list && data.tags.size() <= 20)) &&
+             data.createdAt is timestamp && data.createdAt <= request.time &&
+             data.updatedAt is timestamp && data.updatedAt <= request.time;
+    }
+
+    function isValidQaMessage(data, tenantId) {
+      return data.tenantId == tenantId &&
+             data.userId is string && data.userId.size() >= 1 && data.userId.size() <= 128 &&
+             data.scope in ['meeting', 'all'] &&
+             (!('meetingId' in data) || (data.meetingId is string && data.meetingId.size() <= 128)) &&
+             data.role in ['user', 'assistant'] &&
+             data.isi is string && data.isi.size() >= 1 && data.isi.size() <= 20000 &&
+             data.sumber is list && data.sumber.size() <= 20 &&
+             data.createdAt is timestamp && data.createdAt <= request.time &&
+             data.updatedAt is timestamp && data.updatedAt <= request.time;
+    }
+
+    function isValidTaskConfig(data, tenantId) {
+      return data.tenantId == tenantId &&
+             data.task in ['audio_transcription', 'meeting_summary', 'meeting_analysis', 'meeting_qa', 'action_item_extraction', 'transcript_correction', 'structured_visual_data'] &&
+             data.providerLabel is string && data.providerLabel.size() >= 1 && data.providerLabel.size() <= 60 &&
+             data.modelId is string && data.modelId.size() >= 1 && data.modelId.size() <= 80 &&
+             (!('connectionId' in data) || (data.connectionId is string && data.connectionId.size() <= 80)) &&
+             (!('routingMode' in data) || data.routingMode in ['manual', 'auto']) &&
+             (!('fallbackConnectionId' in data) || (data.fallbackConnectionId is string && data.fallbackConnectionId.size() <= 80)) &&
+             (!('fallbackModelId' in data) || (data.fallbackModelId is string && data.fallbackModelId.size() <= 80)) &&
+             (!('timeoutSec' in data) || (data.timeoutSec is int && data.timeoutSec >= 5 && data.timeoutSec <= 300)) &&
+             (!('retryCount' in data) || (data.retryCount is int && data.retryCount >= 0 && data.retryCount <= 5)) &&
+             data.temperature is number && data.temperature >= 0.0 && data.temperature <= 2.0 &&
+             data.maxOutputTokens is int && data.maxOutputTokens >= 128 && data.maxOutputTokens <= 65536 &&
+             data.enabled is bool &&
+             data.systemPromptOverride is string && data.systemPromptOverride.size() <= 2000 &&
+             data.memberUids is list && data.memberUids.size() >= 1 && data.memberUids.size() <= 50 &&
+             data.createdAt is timestamp && data.createdAt <= request.time &&
+             data.updatedAt is timestamp && data.updatedAt <= request.time;
+    }
+
+    function isValidUsageLog(data, tenantId) {
+      return data.tenantId == tenantId &&
+             data.userId is string && data.userId.size() >= 1 && data.userId.size() <= 128 &&
+             (!('meetingId' in data) || (data.meetingId is string && data.meetingId.size() <= 128)) &&
+             data.task is string && data.task.size() >= 1 && data.task.size() <= 60 &&
+             data.kind in ['ai', 'stt'] &&
+             data.provider is string && data.provider.size() >= 1 && data.provider.size() <= 60 &&
+             data.modelId is string && data.modelId.size() >= 1 && data.modelId.size() <= 80 &&
+             data.status in ['ok', 'error', 'fallback'] &&
+             data.inputTokens is int && data.inputTokens >= 0 &&
+             data.outputTokens is int && data.outputTokens >= 0 &&
+             data.audioSeconds is int && data.audioSeconds >= 0 &&
+             data.latencyMs is int && data.latencyMs >= 0 &&
+             data.estimatedCostUsd is number && data.estimatedCostUsd >= 0 &&
+             data.playgroundMode is bool &&
+             data.adminUids is list && data.adminUids.size() >= 1 && data.adminUids.size() <= 20 &&
+             data.createdAt is timestamp && data.createdAt <= request.time;
+    }
+
+    function isValidAuditLog(data, tenantId) {
+      return data.tenantId == tenantId &&
+             data.userId is string && data.userId.size() >= 1 && data.userId.size() <= 128 &&
+             data.actorEmail is string && data.actorEmail.size() <= 200 &&
+             data.aksi is string && data.aksi.size() >= 1 && data.aksi.size() <= 100 &&
+             data.target is string && data.target.size() >= 1 && data.target.size() <= 200 &&
+             data.detail is string && data.detail.size() <= 500 &&
+             data.adminUids is list && data.adminUids.size() >= 1 && data.adminUids.size() <= 20 &&
+             data.createdAt is timestamp && data.createdAt <= request.time;
+    }
+
+    function isValidModelPrice(data, tenantId) {
+      return data.tenantId == tenantId &&
+             data.provider is string && data.provider.size() >= 1 && data.provider.size() <= 60 &&
+             data.modelId is string && data.modelId.size() >= 1 && data.modelId.size() <= 80 &&
+             data.inputPer1M is number && data.inputPer1M >= 0 &&
+             data.outputPer1M is number && data.outputPer1M >= 0 &&
+             data.currency is string && data.currency.size() >= 1 && data.currency.size() <= 10 &&
+             data.memberUids is list && data.memberUids.size() >= 1 && data.memberUids.size() <= 50 &&
+             data.createdAt is timestamp && data.createdAt <= request.time &&
+             data.updatedAt is timestamp && data.updatedAt <= request.time;
+    }
+
+    function isValidInvite(data, tenantId) {
+      return data.tenantId == tenantId &&
+             data.email is string && data.email.size() >= 3 && data.email.size() <= 200 &&
+             data.role in ['admin', 'member'] &&
+             data.token is string && data.token.size() >= 8 && data.token.size() <= 64 &&
+             data.inviteStatus in ['pending', 'accepted', 'revoked'] &&
+             data.invitedBy is string && data.invitedBy.size() >= 1 && data.invitedBy.size() <= 128 &&
+             data.adminUids is list && data.adminUids.size() >= 1 && data.adminUids.size() <= 20 &&
+             data.createdAt is timestamp && data.createdAt <= request.time &&
+             data.updatedAt is timestamp && data.updatedAt <= request.time;
+    }
+
+    // --- Collection Rules ---
+
+    // 1. User Profiles (Strict PII Isolation)
+    match /users/{userId} {
+      allow get: if isSignedIn() && isValidId(userId) && request.auth.uid == userId;
+      allow list: if false;
+
+      allow create: if isSignedIn() &&
+                       isValidId(userId) &&
+                       request.auth.uid == userId &&
+                       incoming().userId == request.auth.uid &&
+                       incoming().keys().hasAll(['userId', 'displayName', 'email', 'createdAt', 'updatedAt']) &&
+                       incoming().keys().hasOnly(['userId', 'displayName', 'username', 'email', 'photoUrl', 'activeTenantId', 'createdAt', 'updatedAt']) &&
+                       isValidUserProfile(incoming());
+
+      allow update: if isSignedIn() &&
+                       isValidId(userId) &&
+                       request.auth.uid == userId &&
+                       incoming().userId == existing().userId &&
+                       incoming().createdAt == existing().createdAt &&
+                       isValidUserProfile(incoming()) &&
+                       incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'username', 'photoUrl', 'activeTenantId', 'updatedAt']);
+
+      allow delete: if isSignedIn() && isValidId(userId) && request.auth.uid == userId;
+    }
+
+    // 2. Tenants
+    match /tenants/{tenantId} {
+      allow get: if isSignedIn() && isValidId(tenantId) && (request.auth.uid in existing().memberUids || isBootstrappedAdmin());
+      allow list: if isSignedIn() && (request.auth.uid in resource.data.memberUids || isBootstrappedAdmin());
+
+      allow create: if isSignedIn() &&
+                       isValidId(tenantId) &&
+                       incoming().keys().hasAll(['name', 'slug', 'ownerId', 'memberUids', 'adminUids', 'aiMode', 'watermarkEnabled', 'maxFileMb', 'retentionDays', 'monthlyBudgetUsd', 'status', 'createdAt', 'updatedAt']) &&
+                       incoming().keys().hasOnly(['name', 'slug', 'ownerId', 'memberUids', 'adminUids', 'aiMode', 'watermarkEnabled', 'maxFileMb', 'retentionDays', 'monthlyBudgetUsd', 'status', 'createdAt', 'updatedAt']) &&
+                       incoming().ownerId == request.auth.uid &&
+                       incoming().status == 'active' &&
+                       isValidTenant(incoming());
+
+      allow update: if isSignedIn() &&
+                       isValidId(tenantId) &&
+                       isValidTenant(incoming()) &&
+                       incoming().ownerId == existing().ownerId &&
+                       incoming().createdAt == existing().createdAt &&
+                       (
+                         isBootstrappedAdmin() ||
+                         (request.auth.uid == existing().ownerId &&
+                          incoming().status == existing().status &&
+                          incoming().diff(existing()).affectedKeys().hasOnly(['name', 'slug', 'memberUids', 'adminUids', 'aiMode', 'watermarkEnabled', 'maxFileMb', 'retentionDays', 'monthlyBudgetUsd', 'updatedAt'])) ||
+                         (request.auth.uid in existing().adminUids &&
+                          incoming().aiMode == existing().aiMode &&
+                          incoming().status == existing().status &&
+                          incoming().diff(existing()).affectedKeys().hasOnly(['name', 'slug', 'memberUids', 'adminUids', 'watermarkEnabled', 'maxFileMb', 'retentionDays', 'monthlyBudgetUsd', 'updatedAt']))
+                       );
+
+      allow delete: if isSignedIn() && isValidId(tenantId) && (existing().ownerId == request.auth.uid || isBootstrappedAdmin());
+
+      // 2a. Tenant Members
+      match /members/{memberUid} {
+        allow get: if isSignedIn() && isValidId(memberUid) && (request.auth.uid == memberUid || isTenantMember(tenantId));
+        allow list: if isSignedIn() && request.auth.uid in resource.data.memberUids;
+
+        allow create: if isSignedIn() &&
+                         isValidId(memberUid) &&
+                         incoming().keys().hasAll(['userId', 'tenantId', 'displayName', 'email', 'role', 'memberStatus', 'memberUids', 'createdAt', 'updatedAt']) &&
+                         incoming().keys().hasOnly(['userId', 'tenantId', 'displayName', 'email', 'role', 'memberStatus', 'memberUids', 'createdAt', 'updatedAt']) &&
+                         isValidTenantMember(incoming(), tenantId, memberUid) &&
+                         (
+                           isTenantAdmin(tenantId) ||
+                           (memberUid == request.auth.uid && incoming().role == 'owner' && tenantDoc(tenantId).data.ownerId == request.auth.uid)
+                         );
+
+        allow update: if isSignedIn() &&
+                         isValidId(memberUid) &&
+                         isValidTenantMember(incoming(), tenantId, memberUid) &&
+                         incoming().userId == existing().userId &&
+                         incoming().tenantId == existing().tenantId &&
+                         incoming().createdAt == existing().createdAt &&
+                         (
+                           (isTenantAdmin(tenantId) &&
+                            incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'role', 'memberStatus', 'memberUids', 'updatedAt'])) ||
+                           (memberUid == request.auth.uid &&
+                            incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'updatedAt']))
+                         );
+
+        allow delete: if isSignedIn() && isValidId(memberUid) && existing().role != 'owner' && (isTenantAdmin(tenantId) || memberUid == request.auth.uid);
+      }
+
+      // 2b. Meetings
+      match /meetings/{meetingId} {
+        allow get: if isSignedIn() && isValidId(meetingId) && (request.auth.uid in existing().visibleToUids || isTenantAdmin(tenantId));
+        allow list: if isSignedIn() && request.auth.uid in resource.data.visibleToUids;
+
+        allow create: if isSignedIn() &&
+                         isValidId(meetingId) &&
+                         incoming().keys().hasAll(['tenantId', 'userId', 'ownerName', 'judul', 'status', 'durasiDetik', 'ukuranBytes', 'consentRecordedAt', 'visibleToUids', 'sharedWithAll', 'bahasa', 'transcriptText', 'segments', 'ringkasan', 'poinUtama', 'keputusan', 'risiko', 'angkaKunci', 'actionItems', 'createdAt', 'updatedAt']) &&
+                         incoming().keys().hasOnly(['tenantId', 'userId', 'ownerName', 'judul', 'status', 'errorMessage', 'durasiDetik', 'ukuranBytes', 'localAudioPath', 'consentRecordedAt', 'visibleToUids', 'sharedWithAll', 'bahasa', 'transcriptText', 'segments', 'ringkasan', 'poinUtama', 'keputusan', 'risiko', 'angkaKunci', 'actionItems', 'analysis', 'visualData', 'modelInfo', 'isFavorite', 'tags', 'createdAt', 'updatedAt']) &&
+                         incoming().userId == request.auth.uid &&
+                         request.auth.uid in incoming().visibleToUids &&
+                         isValidMeeting(incoming(), tenantId) &&
+                         isTenantMember(tenantId);
+
+        allow update: if isSignedIn() &&
+                         isValidId(meetingId) &&
+                         isValidMeeting(incoming(), tenantId) &&
+                         incoming().tenantId == existing().tenantId &&
+                         incoming().userId == existing().userId &&
+                         incoming().createdAt == existing().createdAt &&
+                         (
+                           ((existing().userId == request.auth.uid || isTenantAdmin(tenantId)) &&
+                            incoming().diff(existing()).affectedKeys().hasOnly(['judul', 'status', 'errorMessage', 'durasiDetik', 'ukuranBytes', 'localAudioPath', 'visibleToUids', 'sharedWithAll', 'bahasa', 'transcriptText', 'segments', 'ringkasan', 'poinUtama', 'keputusan', 'risiko', 'angkaKunci', 'actionItems', 'analysis', 'visualData', 'modelInfo', 'isFavorite', 'tags', 'updatedAt'])) ||
+                           (request.auth.uid in existing().visibleToUids &&
+                            incoming().diff(existing()).affectedKeys().hasOnly(['actionItems', 'isFavorite', 'tags', 'updatedAt']))
+                         );
+
+        allow delete: if isSignedIn() && isValidId(meetingId) && (existing().userId == request.auth.uid || isTenantAdmin(tenantId));
+      }
+
+      // 2c. QA Messages
+      match /qaMessages/{msgId} {
+        allow get: if isSignedIn() && isValidId(msgId) && existing().userId == request.auth.uid;
+        allow list: if isSignedIn() && resource.data.userId == request.auth.uid;
+
+        allow create: if isSignedIn() &&
+                         isValidId(msgId) &&
+                         incoming().keys().hasAll(['tenantId', 'userId', 'scope', 'role', 'isi', 'sumber', 'createdAt', 'updatedAt']) &&
+                         incoming().keys().hasOnly(['tenantId', 'userId', 'scope', 'meetingId', 'role', 'isi', 'sumber', 'createdAt', 'updatedAt']) &&
+                         incoming().userId == request.auth.uid &&
+                         isValidQaMessage(incoming(), tenantId) &&
+                         isTenantMember(tenantId);
+
+        allow delete: if isSignedIn() && isValidId(msgId) && existing().userId == request.auth.uid;
+      }
+
+      // 2d. Task Configs
+      match /taskConfigs/{taskId} {
+        allow get: if isSignedIn() && isValidId(taskId) && isTenantMember(tenantId);
+        allow list: if isSignedIn() && request.auth.uid in resource.data.memberUids;
+
+        allow create: if isSignedIn() &&
+                         isValidId(taskId) &&
+                         incoming().keys().hasAll(['tenantId', 'task', 'providerLabel', 'modelId', 'temperature', 'maxOutputTokens', 'enabled', 'systemPromptOverride', 'memberUids', 'createdAt', 'updatedAt']) &&
+                         incoming().keys().hasOnly(['tenantId', 'task', 'providerLabel', 'modelId', 'connectionId', 'routingMode', 'fallbackConnectionId', 'fallbackModelId', 'timeoutSec', 'retryCount', 'temperature', 'maxOutputTokens', 'enabled', 'systemPromptOverride', 'memberUids', 'createdAt', 'updatedAt']) &&
+                         isValidTaskConfig(incoming(), tenantId) &&
+                         isTenantAdmin(tenantId);
+
+        allow update: if isSignedIn() &&
+                         isValidId(taskId) &&
+                         isValidTaskConfig(incoming(), tenantId) &&
+                         incoming().tenantId == existing().tenantId &&
+                         incoming().task == existing().task &&
+                         incoming().createdAt == existing().createdAt &&
+                         isTenantAdmin(tenantId) &&
+                         incoming().diff(existing()).affectedKeys().hasOnly(['providerLabel', 'modelId', 'connectionId', 'routingMode', 'fallbackConnectionId', 'fallbackModelId', 'timeoutSec', 'retryCount', 'temperature', 'maxOutputTokens', 'enabled', 'systemPromptOverride', 'memberUids', 'updatedAt']);
+
+        allow delete: if isSignedIn() && isValidId(taskId) && isTenantAdmin(tenantId);
+      }
+
+      // 2e. Usage Logs
+      match /usageLogs/{logId} {
+        allow get: if isSignedIn() && isValidId(logId) && (existing().userId == request.auth.uid || isTenantAdmin(tenantId));
+        allow list: if isSignedIn() && (request.auth.uid in resource.data.adminUids || resource.data.userId == request.auth.uid);
+
+        allow create: if isSignedIn() &&
+                         isValidId(logId) &&
+                         incoming().keys().hasAll(['tenantId', 'userId', 'task', 'kind', 'provider', 'modelId', 'status', 'inputTokens', 'outputTokens', 'audioSeconds', 'latencyMs', 'estimatedCostUsd', 'playgroundMode', 'adminUids', 'createdAt']) &&
+                         incoming().keys().hasOnly(['tenantId', 'userId', 'meetingId', 'task', 'kind', 'provider', 'modelId', 'status', 'inputTokens', 'outputTokens', 'audioSeconds', 'latencyMs', 'estimatedCostUsd', 'playgroundMode', 'adminUids', 'createdAt']) &&
+                         incoming().userId == request.auth.uid &&
+                         isValidUsageLog(incoming(), tenantId) &&
+                         isTenantMember(tenantId);
+      }
+
+      // 2f. Audit Logs
+      match /auditLogs/{logId} {
+        allow get: if isSignedIn() && isValidId(logId) && isTenantAdmin(tenantId);
+        allow list: if isSignedIn() && request.auth.uid in resource.data.adminUids;
+
+        allow create: if isSignedIn() &&
+                         isValidId(logId) &&
+                         incoming().keys().hasAll(['tenantId', 'userId', 'actorEmail', 'aksi', 'target', 'detail', 'adminUids', 'createdAt']) &&
+                         incoming().keys().hasOnly(['tenantId', 'userId', 'actorEmail', 'aksi', 'target', 'detail', 'adminUids', 'createdAt']) &&
+                         incoming().userId == request.auth.uid &&
+                         isValidAuditLog(incoming(), tenantId) &&
+                         isTenantMember(tenantId);
+      }
+
+      // 2g. Model Prices
+      match /modelPrices/{priceId} {
+        allow get: if isSignedIn() && isValidId(priceId) && isTenantMember(tenantId);
+        allow list: if isSignedIn() && request.auth.uid in resource.data.memberUids;
+
+        allow create: if isSignedIn() &&
+                         isValidId(priceId) &&
+                         incoming().keys().hasAll(['tenantId', 'provider', 'modelId', 'inputPer1M', 'outputPer1M', 'currency', 'memberUids', 'createdAt', 'updatedAt']) &&
+                         incoming().keys().hasOnly(['tenantId', 'provider', 'modelId', 'inputPer1M', 'outputPer1M', 'currency', 'memberUids', 'createdAt', 'updatedAt']) &&
+                         isValidModelPrice(incoming(), tenantId) &&
+                         isTenantAdmin(tenantId);
+
+        allow update: if isSignedIn() &&
+                         isValidId(priceId) &&
+                         isValidModelPrice(incoming(), tenantId) &&
+                         incoming().tenantId == existing().tenantId &&
+                         incoming().createdAt == existing().createdAt &&
+                         isTenantAdmin(tenantId) &&
+                         incoming().diff(existing()).affectedKeys().hasOnly(['provider', 'modelId', 'inputPer1M', 'outputPer1M', 'currency', 'memberUids', 'updatedAt']);
+
+        allow delete: if isSignedIn() && isValidId(priceId) && isTenantAdmin(tenantId);
+      }
+
+      // 2h. Invites
+      match /invites/{inviteId} {
+        allow get: if isSignedIn() && isValidId(inviteId) && (isTenantAdmin(tenantId) || (request.auth.token.email_verified == true && request.auth.token.email == existing().email));
+        allow list: if isSignedIn() && request.auth.uid in resource.data.adminUids;
+
+        allow create: if isSignedIn() &&
+                         isValidId(inviteId) &&
+                         incoming().keys().hasAll(['tenantId', 'email', 'role', 'token', 'inviteStatus', 'invitedBy', 'adminUids', 'createdAt', 'updatedAt']) &&
+                         incoming().keys().hasOnly(['tenantId', 'email', 'role', 'token', 'inviteStatus', 'invitedBy', 'adminUids', 'createdAt', 'updatedAt']) &&
+                         isValidInvite(incoming(), tenantId) &&
+                         isTenantAdmin(tenantId);
+
+        allow update: if isSignedIn() &&
+                         isValidId(inviteId) &&
+                         isValidInvite(incoming(), tenantId) &&
+                         incoming().tenantId == existing().tenantId &&
+                         incoming().createdAt == existing().createdAt &&
+                         isTenantAdmin(tenantId) &&
+                         incoming().diff(existing()).affectedKeys().hasOnly(['role', 'inviteStatus', 'adminUids', 'updatedAt']);
+
+        allow delete: if isSignedIn() && isValidId(inviteId) && isTenantAdmin(tenantId);
+      }
+    }
+  }
+}
