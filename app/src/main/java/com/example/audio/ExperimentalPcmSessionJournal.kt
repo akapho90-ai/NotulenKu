@@ -29,7 +29,7 @@ class ExperimentalPcmSessionJournal(private val directory: File) {
             "sample_rate=${metadata.sampleRateHz}", "format=${metadata.format}",
             "status=${metadata.status.name}", "checkpoint_bytes=${metadata.checkpointBytes}",
             "updated_at=${metadata.updatedAtEpochMs}"
-        ).joinToString("\\n", postfix="\\n"))
+        ).joinToString("\n", postfix="\n"))
         if (file.exists() && !file.delete()) { temp.delete(); throw IOException("Tidak dapat mengganti journal PCM.") }
         if (!temp.renameTo(file)) { temp.copyTo(file, overwrite=true); temp.delete() }
     }
