@@ -27,8 +27,11 @@ class LiveCaptureTranscriptionAdapter(
         return accepted
     }
 
-    /** Returns the next frame for a separate provider worker, or null when empty. */
+    /** Non-blocking dequeue for tests/manual consumers. */
     fun pollFrame(): LiveAudioFrame? = queue.poll()
+
+    /** Suspends until a frame is available for the provider worker. */
+    suspend fun awaitFrame(): LiveAudioFrame = queue.receive()
 
     @Synchronized
     fun clear() {
