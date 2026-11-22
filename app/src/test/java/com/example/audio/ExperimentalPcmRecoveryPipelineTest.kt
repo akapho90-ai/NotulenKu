@@ -30,4 +30,19 @@ class ExperimentalPcmRecoveryPipelineTest {
             assertFalse(File(root,"recovered").exists())
         } finally { root.deleteRecursively() }
     }
+    @Test fun preflightReportCollisionDoesNotCopyRecoveryPcm() {
+        val root=createTempDir()
+        try {
+            val source=File(root,"s1.pcm");source.writeBytes(ByteArray(32000))
+            val metadata=ExperimentalPcmSessionMetadata("s1","s1.pcm",16000,status=ExperimentalPcmSessionStatus.RECOVERABLE,checkpointBytes=32000,updatedAtEpochMs=1)
+            val assessment=ExperimentalPcmRecoveryAssessment(metadata,source,true,"",ExperimentalPcmIntegrityResult(true,true,true,true,32000,null,emptyList()))
+            val recovery=File(root,"recovered");assertTrue(recovery.mkdirs())
+            val report=File(recovery,"s1.recovered.wav.pipeline-report.txt");report.writeText("preserve")
+            val result=ExperimentalPcmRecoveryPipeline(root).run(assessment,true)
+            assertEquals(PcmRecoveryPipelineStatus.FAILED,result.status)
+            assertTrue(report.exists())
+            assertEquals("preserve",report.readText())
+            assertFalse(File(recovery,"s1.recovered.pcm").exists())
+        } finally { root.deleteRecursively() }
+    }
 }
