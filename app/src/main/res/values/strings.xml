@@ -1,0 +1,11 @@
+<resources>
+    <string name="app_name">NotulenKu</string>
+    <string name="app_subtitle">Catatan Rapat AI</string>
+    <string name="app_version">v1.0.0</string>
+    <string name="privacy_notice">Rekaman audio asli tetap tersimpan di perangkat Anda. Transkrip, notulen, dan riwayat hanya dapat diakses oleh akun Anda.</string>
+    <string name="ai_disclaimer">Dibuat oleh AI, periksa kembali sebelum dibagikan.</string>
+    <string name="consent_recording">Saya sudah memberi tahu semua peserta bahwa rapat ini direkam.</string>
+    <string name="mic_permission_rationale">Izin mikrofon diperlukan untuk merekam suara rapat secara langsung.</string>
+    <string name="notification_permission_rationale">Izin notifikasi diperlukan agar rekaman latar belakang tetap terlihat dan stabil saat layar dikunci atau berpindah aplikasi.</string>
+    <string name="mic_speaker_tip">Tips: Rekaman berjalan dengan layanan latar depan agar tidak terputus saat layar terkunci. Jika ada panggilan telepon/VoIP masuk, Android akan membisukan mikrofon dan aplikasi otomatis menjeda rekaman dengan aman.</string>
+</resources>
