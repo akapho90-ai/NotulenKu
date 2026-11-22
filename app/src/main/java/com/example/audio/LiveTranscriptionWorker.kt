@@ -29,7 +29,12 @@ class LiveTranscriptionWorker(
                     onFinal = { LiveTranscriptRepository.upsert(sessionId, it.copy(isFinal = true)) }
                 )
                 LiveTranscriptRepository.setStatus(sessionId, LiveTranscriptionStatus.LIVE)
-                while (true) provider.sendFrame(adapter.awaitFrame())
+                while (true) {
+                    provider.sendFrame(adapter.awaitFrame())
+                    if (adapter.droppedFrameCount > 0) {
+                        LiveTranscriptRepository.setStatus(sessionId, LiveTranscriptionStatus.DEGRADED, "Sebagian frame audio transkripsi terlewat. Rekaman utama tetap aman.")
+                    }
+                }
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (failure: Throwable) {
