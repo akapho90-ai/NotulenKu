@@ -30,7 +30,7 @@ class ExperimentalPcmSessionJournal(private val directory: File) {
             "sample_rate=${metadata.sampleRateHz}", "format=${metadata.format}",
             "status=${metadata.status.name}", "checkpoint_bytes=${metadata.checkpointBytes}",
             "updated_at=${metadata.updatedAtEpochMs}"
-        ).joinToString("\\n", postfix="\\n")
+        ).joinToString("\n", postfix="\n")
         FileOutputStream(temp).use { out ->
             out.write(content.toByteArray(Charsets.UTF_8))
             out.flush()
