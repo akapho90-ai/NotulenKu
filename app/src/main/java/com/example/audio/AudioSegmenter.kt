@@ -311,12 +311,15 @@ object AudioSegmenter {
      */
     fun mergeM4aSegments(segmentFiles: List<File>, outputFile: File): Result<File> {
         if (segmentFiles.isEmpty()) return Result.failure(IllegalStateException("Tidak ada segmen rekaman untuk digabungkan."))
-        // Fail closed: never silently omit requested recording parts.
+        // Check the complete list before opening media containers or changing the output.
         val candidates = segmentFiles
-        for (file in candidates) {
-            if (!file.exists() || file.length() <= 256L || !isReadableAudioFile(file)) {
-                return Result.failure(IllegalStateException("Segmen audio tidak valid atau hilang: ${file.name}"))
-            }
+        val missing = candidates.firstOrNull { !it.isFile || it.length() <= 256L }
+        if (missing != null) {
+            return Result.failure(IllegalStateException("Segmen audio tidak valid atau hilang: ${missing.name}"))
+        }
+        val unreadable = candidates.firstOrNull { !isReadableAudioFile(it) }
+        if (unreadable != null) {
+            return Result.failure(IllegalStateException("Segmen audio tidak dapat dibaca: ${unreadable.name}"))
         }
 
         var chosenFormat: MediaFormat? = null
@@ -353,7 +356,7 @@ object AudioSegmenter {
                 staged.delete()
                 single.copyTo(staged, overwrite = true)
                 if (!isReadableAudioFile(staged)) throw IllegalStateException("Salinan audio tidak lolos validasi.")
-                promoteValidatedAudio(staged, outputFile)
+                promoteValidatedAudio(staged, outputFile, ::isReadableAudioFile)
                 Result.success(outputFile)
             } catch (e: Exception) {
                 runCatching { staged.delete() }
@@ -410,8 +413,7 @@ object AudioSegmenter {
             muxer.release()
             muxer = null
             if (totalSamplesWritten == 0L || !isReadableAudioFile(tempMerged)) throw IllegalStateException("Hasil merge tidak lolos validasi audio.")
-            promoteValidatedAudio(tempMerged, outputFile)
-            if (!isReadableAudioFile(outputFile)) throw IllegalStateException("File final gagal validasi setelah promosi.")
+            promoteValidatedAudio(tempMerged, outputFile, ::isReadableAudioFile)
             Result.success(outputFile)
         } catch (e: Exception) {
             Log.e(TAG, "Merge failed; source segments preserved", e)
@@ -421,31 +423,41 @@ object AudioSegmenter {
         }
     }
 
-    /** Staged promotion with backup/restore attempt and validation after final placement. */
-    private fun promoteValidatedAudio(staged: File, destination: File) {
-        if (!isReadableAudioFile(staged)) throw IllegalStateException("File staged tidak valid.")
+    /** Same-directory promotion. A backup survives until a playable destination is verified. */
+    internal fun promoteValidatedAudio(
+        staged: File,
+        destination: File,
+        isReadable: (File) -> Boolean,
+        move: (File, File) -> Boolean = File::renameTo
+    ) {
+        if (!isReadable(staged)) throw IllegalStateException("File staged tidak valid.")
         val backup = File(destination.parentFile, "${destination.name}.backup")
-        if (backup.exists() && !backup.delete()) throw IllegalStateException("Tidak dapat membersihkan backup audio.")
-        val hadDestination = destination.exists()
-        if (hadDestination && !destination.renameTo(backup)) {
-            destination.copyTo(backup, overwrite = true)
-            if (!isReadableAudioFile(backup)) throw IllegalStateException("Backup file lama gagal validasi.")
+        val replacingValidDestination = destination.isFile && isReadable(destination)
+
+        if (replacingValidDestination) {
+            // The current destination is still safe while a stale backup is cleared.
+            if (backup.exists() && (!backup.isFile || !backup.delete())) {
+                throw IllegalStateException("Tidak dapat membersihkan backup audio.")
+            }
+            if (!move(destination, backup)) throw IllegalStateException("Tidak dapat menyimpan backup audio.")
+        } else if (destination.exists() && (!destination.isFile || !destination.delete())) {
+            throw IllegalStateException("Tidak dapat mengosongkan tujuan.")
         }
+
+        // When retrying with no valid destination, any existing backup stays in place.
+        var promoted = false
         try {
-            if (destination.exists() && !destination.delete()) throw IllegalStateException("Tidak dapat mengosongkan tujuan.")
-            if (!staged.renameTo(destination)) {
-                staged.copyTo(destination, overwrite = true)
-                staged.delete()
+            promoted = move(staged, destination)
+            if (!promoted) throw IllegalStateException("Tidak dapat mempromosikan audio hasil merge.")
+            if (!isReadable(destination)) throw IllegalStateException("File promoted gagal validasi.")
+        } catch (failure: Exception) {
+            if (promoted) runCatching { destination.delete() }
+            if (replacingValidDestination && !destination.exists()) {
+                runCatching { move(backup, destination) }
             }
-            if (!isReadableAudioFile(destination)) throw IllegalStateException("File promoted gagal validasi.")
-            runCatching { backup.delete() }
-        } catch (e: Exception) {
-            runCatching { destination.delete() }
-            if (hadDestination && backup.exists()) {
-                if (!backup.renameTo(destination)) runCatching { backup.copyTo(destination, overwrite = true) }
-            }
-            throw e
+            throw failure
         }
+        if (backup.isFile) runCatching { backup.delete() }
     }
 
     /**

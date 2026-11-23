@@ -289,6 +289,7 @@ class MeetingRecordingService : Service() {
 
     private fun handleStop() {
         val st = RecordingStateRepository.state.value
+        if (st.status == RecordingStatus.STOPPING) return
         if (!st.isSessionActive) {
             stopSelf()
             return
@@ -300,8 +301,9 @@ class MeetingRecordingService : Service() {
         cleanupMonitors()
 
         val finalElapsed = st.elapsedSeconds.coerceAtLeast(1L)
-        val capturedSegments = completedSegmentFiles.filter { it.exists() && it.length() > 256L }
+        val capturedSegments = completedSegmentFiles.toList()
         val activeSessionId = sessionId
+        if (capturedSegments.isNotEmpty()) persistJournal()
 
         serviceScope.launch(Dispatchers.IO) {
             if (capturedSegments.isEmpty()) {
@@ -315,54 +317,23 @@ class MeetingRecordingService : Service() {
             } else {
                 val outDir = File(filesDir, "recordings").apply { mkdirs() }
                 val finalFile = File(outDir, "rec_${activeSessionId}.m4a")
-                val mergeResult = AudioSegmenter.mergeM4aSegments(capturedSegments, finalFile)
-                mergeResult.onSuccess { merged ->
-                    val detectedDur = AudioSegmenter.detectDurationSeconds(merged).coerceAtLeast(finalElapsed)
-                    // Delete raw segment parts ONLY after merged file is confirmed valid
-                    if (merged.exists() && merged.length() > 256L) {
-                        capturedSegments.filter { it.absolutePath != merged.absolutePath }
-                            .forEach { runCatching { it.delete() } }
-                        RecordingStateRepository.deleteSessionJournal(applicationContext, activeSessionId)
-                    }
+                RecordingStateRepository.finalizeSessionToAudioFile(
+                    applicationContext, activeSessionId, capturedSegments, finalFile, finalElapsed
+                ).onSuccess { recording ->
                     RecordingStateRepository.update {
                         ActiveRecordingState(
                             status = RecordingStatus.IDLE,
-                            elapsedSeconds = detectedDur,
-                            completedRecording = RecordedAudioFile(
-                                file = merged,
-                                durationSeconds = detectedDur,
-                                sizeBytes = merged.length(),
-                                mimeType = "audio/mp4"
-                            )
+                            elapsedSeconds = recording.durationSeconds,
+                            completedRecording = recording
                         )
                     }
-                }.onFailure { err ->
-                    // NEVER delete segments if merge fails — keep journal intact so recovery can salvage them!
-                    Log.e(TAG, "Merge failed on stop; preserving all raw segments for recovery", err)
-                    val fallbackSeg = capturedSegments.maxByOrNull { it.length() }
-                    if (fallbackSeg != null && capturedSegments.size == 1) {
-                        val detectedDur = AudioSegmenter.detectDurationSeconds(fallbackSeg).coerceAtLeast(finalElapsed)
-                        RecordingStateRepository.deleteSessionJournal(applicationContext, activeSessionId)
-                        RecordingStateRepository.update {
-                            ActiveRecordingState(
-                                status = RecordingStatus.IDLE,
-                                elapsedSeconds = detectedDur,
-                                completedRecording = RecordedAudioFile(
-                                    file = fallbackSeg,
-                                    durationSeconds = detectedDur,
-                                    sizeBytes = fallbackSeg.length(),
-                                    mimeType = "audio/mp4"
-                                )
-                            )
-                        }
-                    } else {
-                        persistJournal()
-                        RecordingStateRepository.update {
-                            ActiveRecordingState(
-                                status = RecordingStatus.IDLE,
-                                lastError = "Penggabungan segmen gagal (${err.localizedMessage ?: "error"}), tetapi semua bagian audio tetap aman di perangkat dan dapat dipulihkan."
-                            )
-                        }
+                }.onFailure { error ->
+                    Log.e(TAG, "Merge failed on stop; preserving session journal and remaining parts", error)
+                    RecordingStateRepository.update {
+                        ActiveRecordingState(
+                            status = RecordingStatus.IDLE,
+                            lastError = "Rekaman tidak dapat difinalisasi (${error.localizedMessage ?: "error"}). Bagian yang masih ada tetap disimpan."
+                        )
                     }
                 }
             }
@@ -438,11 +409,9 @@ class MeetingRecordingService : Service() {
             }
             runCatching { mr.release() }
         }
-        if (file != null && file.exists() && file.length() > 512L) {
-            // Check recoverability before accepting; never delete prematurely if non-empty
-            if (!completedSegmentFiles.any { it.absolutePath == file.absolutePath }) {
-                completedSegmentFiles.add(file)
-            }
+        // Keep every started part in the manifest, including a part that failed to finalize.
+        if (file != null && completedSegmentFiles.none { it.absolutePath == file.absolutePath }) {
+            completedSegmentFiles.add(file)
         }
     }
 
