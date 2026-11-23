@@ -86,6 +86,8 @@ jobs:
           fi
 
       - name: Run unit and Robolectric regression tests
+        env:
+          JAVA_TOOL_OPTIONS: -Drobolectric.dependency.repo.url=https://repo.maven.apache.org/maven2
         run: gradle :app:testDebugUnitTest --no-daemon --no-configuration-cache --stacktrace
 
       - name: Build signed debug APK
