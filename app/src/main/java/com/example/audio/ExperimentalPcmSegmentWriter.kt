@@ -10,12 +10,20 @@ import java.io.RandomAccessFile
  * Experimental append-only PCM segment writer with checkpoint-based reopen recovery.
  * Raw PCM16 mono only; not a finalized recording and not production recovery.
  */
-class ExperimentalPcmSegmentWriter(
+class ExperimentalPcmSegmentWriter internal constructor(
     private val directory: File,
     private val sessionId: String,
-    private val sampleRateHz: Int = 16_000,
-    private val flushIntervalBytes: Int = sampleRateHz * 2
+    private val sampleRateHz: Int,
+    private val flushIntervalBytes: Int,
+    private val persistence: PcmPersistenceIo
 ) : AutoCloseable {
+    constructor(
+        directory: File,
+        sessionId: String,
+        sampleRateHz: Int = 16_000,
+        flushIntervalBytes: Int = sampleRateHz * 2
+    ) : this(directory, sessionId, sampleRateHz, flushIntervalBytes, DefaultPcmPersistenceIo)
+
     private val safeSessionId = validateSessionId(sessionId)
     private val file = File(directory, "$safeSessionId.pcm")
     private val checkpoint = File(directory, "$safeSessionId.pcm.checkpoint")
@@ -26,7 +34,7 @@ class ExperimentalPcmSegmentWriter(
     private var bytesWritten = 0L
     private var bytesSinceFlush = 0
     private var failed = false
-    private val journal = ExperimentalPcmSessionJournal(directory)
+    private val journal = ExperimentalPcmSessionJournal(directory, persistence)
 
     init {
         require(sampleRateHz > 0)
@@ -67,10 +75,10 @@ class ExperimentalPcmSegmentWriter(
             checkpointBytes(it, actualPcmBytes) == trustedBytes
         } ?: throw IOException("Tidak ada checkpoint PCM yang cocok dengan journal dan ukuran file.")
 
-        if (checkpoint.exists() && !archiveInvalidPcmRecord(checkpoint)) {
+        if (checkpoint.exists() && !archiveInvalidPcmRecord(checkpoint, persistence)) {
             throw IOException("Tidak dapat mengarsipkan checkpoint PCM lama.")
         }
-        if (!candidate.renameTo(checkpoint) || checkpointBytes(checkpoint, actualPcmBytes) != trustedBytes) {
+        if (!persistence.rename(candidate, checkpoint) || checkpointBytes(checkpoint, actualPcmBytes) != trustedBytes) {
             throw IOException("Tidak dapat memulihkan checkpoint PCM.")
         }
         if (checkpointBackup.isFile) checkpointBackup.delete()
@@ -110,7 +118,7 @@ class ExperimentalPcmSegmentWriter(
         if (pcm.isEmpty()) return
         try {
             if (pcm.size % 2 != 0) throw IOException("Frame PCM16 memiliki jumlah byte ganjil.")
-            stream!!.write(pcm)
+            persistence.write(file, stream!!, pcm)
             bytesWritten += pcm.size
             bytesSinceFlush += pcm.size
             if (bytesSinceFlush >= flushIntervalBytes) writeCheckpoint(force = false)
@@ -121,8 +129,8 @@ class ExperimentalPcmSegmentWriter(
     }
 
     private fun writeCheckpoint(force: Boolean) {
-        stream?.flush()
-        rawStream?.fd?.sync()
+        stream?.let { persistence.flush(file, it) }
+        rawStream?.let { persistence.sync(file, it.fd) }
         if (force || bytesSinceFlush >= flushIntervalBytes) {
             val text = listOf(
                 "session=$safeSessionId", "file=${file.name}", "format=pcm16_mono",
@@ -138,9 +146,9 @@ class ExperimentalPcmSegmentWriter(
 
     private fun replaceCheckpoint(text: String) {
         FileOutputStream(checkpointTemp).use { out ->
-            out.write(text.toByteArray(Charsets.UTF_8))
-            out.flush()
-            out.fd.sync()
+            persistence.write(checkpointTemp, out, text.toByteArray(Charsets.UTF_8))
+            persistence.flush(checkpointTemp, out)
+            persistence.sync(checkpointTemp, out.fd)
         }
         if (checkpointTemp.readText(Charsets.UTF_8) != text) {
             throw IOException("Verifikasi checkpoint sementara gagal.")
@@ -148,16 +156,16 @@ class ExperimentalPcmSegmentWriter(
         if (checkpointBackup.exists() && (!checkpointBackup.isFile || !checkpointBackup.delete())) {
             throw IOException("Tidak dapat membersihkan backup checkpoint PCM.")
         }
-        if (checkpoint.exists() && !checkpoint.renameTo(checkpointBackup)) {
+        if (checkpoint.exists() && !persistence.rename(checkpoint, checkpointBackup)) {
             throw IOException("Tidak dapat menyimpan backup checkpoint PCM.")
         }
-        if (!checkpointTemp.renameTo(checkpoint)) {
-            if (checkpointBackup.isFile && !checkpoint.exists()) checkpointBackup.renameTo(checkpoint)
+        if (!persistence.rename(checkpointTemp, checkpoint)) {
+            if (checkpointBackup.isFile && !checkpoint.exists()) persistence.rename(checkpointBackup, checkpoint)
             throw IOException("Tidak dapat mempromosikan checkpoint PCM.")
         }
         if (checkpoint.readText(Charsets.UTF_8) != text) {
-            if (checkpointBackup.isFile && archiveInvalidPcmRecord(checkpoint)) {
-                checkpointBackup.renameTo(checkpoint)
+            if (checkpointBackup.isFile && archiveInvalidPcmRecord(checkpoint, persistence)) {
+                persistence.rename(checkpointBackup, checkpoint)
             }
             throw IOException("Verifikasi checkpoint hasil penggantian gagal.")
         }
@@ -165,8 +173,8 @@ class ExperimentalPcmSegmentWriter(
 
     private fun failWriter(fallbackCheckpointBytes: Long = 0L) {
         failed = true
-        runCatching { stream?.flush() }
-        runCatching { rawStream?.fd?.sync() }
+        runCatching { stream?.let { persistence.flush(file, it) } }
+        runCatching { rawStream?.let { persistence.sync(file, it.fd) } }
         runCatching { stream?.close() }
         stream = null
         rawStream = null
@@ -181,8 +189,8 @@ class ExperimentalPcmSegmentWriter(
         val out = stream ?: return
         if (failed) { runCatching { out.close() }; stream = null; rawStream = null; return }
         try {
-            out.flush()
-            rawStream?.fd?.sync()
+            persistence.flush(file, out)
+            rawStream?.let { persistence.sync(file, it.fd) }
             writeCheckpoint(force = true)
             journal.write(metadata(ExperimentalPcmSessionStatus.RECOVERABLE))
         } catch (e: Exception) {

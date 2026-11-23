@@ -16,7 +16,12 @@ data class ExperimentalPcmSessionMetadata(
     val updatedAtEpochMs: Long
 )
 
-class ExperimentalPcmSessionJournal(private val directory: File) {
+class ExperimentalPcmSessionJournal internal constructor(
+    private val directory: File,
+    private val persistence: PcmPersistenceIo
+) {
+    constructor(directory: File) : this(directory, DefaultPcmPersistenceIo)
+
     private val sessionIdPattern = Regex("[A-Za-z0-9_-]{1,128}")
 
     @Synchronized
@@ -41,9 +46,9 @@ class ExperimentalPcmSessionJournal(private val directory: File) {
             "updated_at=${metadata.updatedAtEpochMs}"
         ).joinToString("\n", postfix = "\n")
         FileOutputStream(temp).use { out ->
-            out.write(content.toByteArray(Charsets.UTF_8))
-            out.flush()
-            out.fd.sync()
+            persistence.write(temp, out, content.toByteArray(Charsets.UTF_8))
+            persistence.flush(temp, out)
+            persistence.sync(temp, out.fd)
         }
         if (readRecord(temp) != metadata) throw IOException("Verifikasi journal sementara gagal.")
 
@@ -51,13 +56,13 @@ class ExperimentalPcmSessionJournal(private val directory: File) {
             if (backup.exists() && (!backup.isFile || !backup.delete())) {
                 throw IOException("Tidak dapat membersihkan backup journal.")
             }
-            if (!file.renameTo(backup)) throw IOException("Tidak dapat menyimpan backup journal.")
-        } else if (file.exists() && !archiveInvalidPcmRecord(file)) {
+            if (!persistence.rename(file, backup)) throw IOException("Tidak dapat menyimpan backup journal.")
+        } else if (file.exists() && !archiveInvalidPcmRecord(file, persistence)) {
             throw IOException("Tidak dapat mengarsipkan journal PCM yang tidak valid.")
         }
 
-        if (!temp.renameTo(file)) {
-            if (previous != null && !file.exists()) backup.renameTo(file)
+        if (!persistence.rename(temp, file)) {
+            if (previous != null && !file.exists()) persistence.rename(backup, file)
             throw IOException("Tidak dapat mempromosikan journal PCM.")
         }
         if (readRecord(file) != metadata) {
@@ -117,10 +122,10 @@ class ExperimentalPcmSessionJournal(private val directory: File) {
         val candidate = if (backupMetadata != null) backup else temp
         val metadata = backupMetadata ?: readRecord(temp) ?: return
 
-        if (target.exists() && !archiveInvalidPcmRecord(target)) return
+        if (target.exists() && !archiveInvalidPcmRecord(target, persistence)) return
         // If promotion fails or the process stops after archiving, the candidate
         // is still available for the next recovery attempt.
-        if (!candidate.renameTo(target) || readRecord(target) != metadata) return
+        if (!persistence.rename(candidate, target) || readRecord(target) != metadata) return
 
         if (backup.isFile) backup.delete()
         if (temp.isFile) temp.delete()
@@ -162,7 +167,7 @@ class ExperimentalPcmSessionJournal(private val directory: File) {
     }
 }
 
-internal fun archiveInvalidPcmRecord(target: File): Boolean {
+internal fun archiveInvalidPcmRecord(target: File, persistence: PcmPersistenceIo): Boolean {
     if (!target.isFile) return false
     val archiveName = target.name + ".invalid"
     var archive = File(target.parentFile, archiveName)
@@ -171,7 +176,7 @@ internal fun archiveInvalidPcmRecord(target: File): Boolean {
         archive = File(target.parentFile, "$archiveName.$suffix")
         suffix++
     }
-    return target.renameTo(archive)
+    return persistence.rename(target, archive)
 }
 
 data class ExperimentalPcmRecoveryAssessment(
