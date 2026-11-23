@@ -2,6 +2,7 @@ package com.example.audio
 
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.test.runCurrent
+import kotlinx.coroutines.test.advanceUntilIdle
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -56,7 +57,7 @@ class LiveTranscriptionWorkerTest {
         }
         val worker = LiveTranscriptionWorker("failure-test", LiveCaptureTranscriptionAdapter("failure-test"), failing, backgroundScope)
         worker.start()
-        runCurrent()
+        advanceUntilIdle()
         assertEquals(LiveTranscriptionStatus.FALLBACK, LiveTranscriptRepository.state.value.status)
         LiveTranscriptRepository.clear("failure-test")
     }
