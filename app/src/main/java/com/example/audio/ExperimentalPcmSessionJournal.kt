@@ -103,8 +103,17 @@ class ExperimentalPcmSessionJournal(private val directory: File) {
     }
 
     fun list(): List<ExperimentalPcmSessionMetadata> {
-        directory.listFiles { f -> f.isFile && f.name.endsWith(".pcm.journal") }
-            ?.forEach(::recoverPromotion)
+        val targets = directory.listFiles()?.filter { f ->
+            f.isFile && (f.name.endsWith(".pcm.journal") ||
+                f.name.endsWith(".pcm.journal.bak") || f.name.endsWith(".pcm.journal.tmp"))
+        }?.map { f ->
+            when {
+                f.name.endsWith(".pcm.journal.bak") -> File(directory, f.name.removeSuffix(".bak"))
+                f.name.endsWith(".pcm.journal.tmp") -> File(directory, f.name.removeSuffix(".tmp"))
+                else -> f
+            }
+        }?.distinctBy { it.name } ?: emptyList()
+        targets.forEach(::recoverPromotion)
         return directory.listFiles { f -> f.isFile && f.name.endsWith(".pcm.journal") }
             ?.mapNotNull(::read)?.sortedByDescending { it.updatedAtEpochMs } ?: emptyList()
     }
