@@ -40,11 +40,16 @@ class ExperimentalPcmRecoveryDecisionEngineTest {
     }
 
     @Test fun validAssessmentIsRecoverableButPlaybackIsNotClaimed() {
-        val metadata = ExperimentalPcmSessionMetadata("s1", "s1.pcm", 16000, status=ExperimentalPcmSessionStatus.RECOVERABLE, checkpointBytes=32000, updatedAtEpochMs=1)
-        val integrity = ExperimentalPcmIntegrityResult(true,true,true,true,32000,"abc",emptyList())
-        val assessment = ExperimentalPcmRecoveryAssessment(metadata,File("s1.pcm"),true,"ok",integrity)
-        val decision = engine.decide(assessment)
-        assertEquals(PcmRecoveryDecisionType.RECOVERABLE,decision.type)
-        assertTrue(decision.reasons.any { it.contains("Playback belum") })
+        val dir = kotlin.io.path.createTempDirectory("decision-engine-test").toFile()
+        try {
+            val pcm = File(dir, "s1.pcm")
+            pcm.writeBytes(ByteArray(32000))
+            val metadata = ExperimentalPcmSessionMetadata("s1", pcm.name, 16000, status=ExperimentalPcmSessionStatus.RECOVERABLE, checkpointBytes=32000, updatedAtEpochMs=1)
+            val integrity = ExperimentalPcmIntegrityResult(true,true,true,true,32000,"abc",emptyList())
+            val assessment = ExperimentalPcmRecoveryAssessment(metadata,pcm,true,"ok",integrity)
+            val decision = engine.decide(assessment)
+            assertEquals(PcmRecoveryDecisionType.RECOVERABLE,decision.type)
+            assertTrue(decision.reasons.any { it.contains("Playback belum") })
+        } finally { dir.deleteRecursively() }
     }
 }
