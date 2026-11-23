@@ -33,6 +33,36 @@ class ExperimentalPcmSessionJournalTest {
         } finally { dir.deleteRecursively() }
     }
 
+
+    @Test fun journalBackupIsRecoveredWhenPrimaryIsMissing() {
+        val dir=kotlin.io.path.createTempDirectory("pcm-journal-recovery").toFile()
+        try {
+            val journal=ExperimentalPcmSessionJournal(dir)
+            val target=File(dir,"recover.pcm.journal")
+            journal.write(ExperimentalPcmSessionMetadata("recover","recover.pcm",16000,status=ExperimentalPcmSessionStatus.RECOVERABLE,checkpointBytes=4,updatedAtEpochMs=10))
+            val backup=File(dir,target.name+".bak")
+            assertTrue(target.renameTo(backup))
+            val restored=journal.list()
+            assertTrue(restored.any { it.sessionId=="recover" && it.checkpointBytes==4L })
+            assertTrue(target.isFile)
+            assertFalse(backup.exists())
+        } finally { dir.deleteRecursively() }
+    }
+
+    @Test fun validJournalTempIsRecoveredWhenNoPrimaryOrBackupExists() {
+        val dir=kotlin.io.path.createTempDirectory("pcm-journal-recovery").toFile()
+        try {
+            val journal=ExperimentalPcmSessionJournal(dir)
+            val target=File(dir,"tempRecover.pcm.journal")
+            val temp=File(dir,target.name+".tmp")
+            temp.writeText("session=tempRecover\\nfile=tempRecover.pcm\\nsample_rate=16000\\nformat=pcm16_mono\\nstatus=RECOVERABLE\\ncheckpoint_bytes=2\\nupdated_at=11\\n")
+            val restored=journal.list()
+            assertTrue(restored.any { it.sessionId=="tempRecover" && it.checkpointBytes==2L })
+            assertTrue(target.isFile)
+            assertFalse(temp.exists())
+        } finally { dir.deleteRecursively() }
+    }
+
     @Test fun validCheckpointGetsIntegrityHashAndOrphanIsRejected() {
         val dir=kotlin.io.path.createTempDirectory("pcm-journal-test").toFile()
         try {
