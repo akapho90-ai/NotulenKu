@@ -11,7 +11,7 @@ import java.util.concurrent.atomic.AtomicBoolean
  */
 class ExperimentalLiveCaptureSession(
     context: Context,
-    sessionId: String,
+    private val sessionId: String,
     provider: LiveTranscriptionProvider,
     scope: CoroutineScope,
     sampleRateHz: Int = 16_000,
