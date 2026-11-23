@@ -53,6 +53,9 @@ class ExperimentalPcmSegmentWriter(
     private fun reconcileExistingFile() {
         if (!file.exists()) { bytesWritten = 0L; return }
         val actual = file.length()
+        if (!checkpoint.exists()) {
+            throw IOException("File PCM lama ditemukan tanpa checkpoint; append ditolak untuk mencegah reuse data yang tidak terverifikasi.")
+        }
         var trustedBytes = actual
         if (checkpoint.exists()) {
             val values = checkpoint.readLines().mapNotNull { line ->
@@ -80,8 +83,8 @@ class ExperimentalPcmSegmentWriter(
         if (failed) throw IOException("Writer PCM gagal; append dihentikan.")
         if (stream == null) open()
         if (pcm.isEmpty()) return
-        if (pcm.size % 2 != 0) throw IOException("Frame PCM16 memiliki jumlah byte ganjil.")
         try {
+            if (pcm.size % 2 != 0) throw IOException("Frame PCM16 memiliki jumlah byte ganjil.")
             stream!!.write(pcm)
             bytesWritten += pcm.size
             bytesSinceFlush += pcm.size
