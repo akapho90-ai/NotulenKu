@@ -41,7 +41,6 @@ class LiveCaptureTranscriptionAdapter(
     }
 
     val queuedFrames: Int get() = queue.size()
-    @Synchronized
-    val droppedFrameCount: Long get() = droppedFrames
+    val droppedFrameCount: Long get() = synchronized(this) { droppedFrames }
     val pendingAssemblerBytes: Int get() = assembler.pendingByteCount
 }
