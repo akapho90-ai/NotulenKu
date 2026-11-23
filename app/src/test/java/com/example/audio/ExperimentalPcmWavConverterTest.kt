@@ -6,12 +6,12 @@ import java.io.File
 
 class ExperimentalPcmWavConverterTest {
     @Test fun requiresConfirmation() {
-        val root=createTempDir()
+        val root=kotlin.io.path.createTempDirectory().toFile()
         try { val src=File(root,"audio.recovered.pcm");src.writeBytes(byteArrayOf(1,2));try{ExperimentalPcmWavConverter(root).convert(src,16000,false);fail()}catch(_:Exception){} }
         finally { root.deleteRecursively() }
     }
     @Test fun convertsAndValidatesWavWithoutChangingSource() {
-        val root=createTempDir()
+        val root=kotlin.io.path.createTempDirectory().toFile()
         try {
             val src=File(root,"audio.recovered.pcm");val bytes=byteArrayOf(1,2,3,4,5,6,7,8);src.writeBytes(bytes)
             val result=ExperimentalPcmWavConverter(root).convert(src,16000,true)
@@ -23,12 +23,12 @@ class ExperimentalPcmWavConverterTest {
         } finally { root.deleteRecursively() }
     }
     @Test fun rejectsOddOrEmptyPcm() {
-        val root=createTempDir()
+        val root=kotlin.io.path.createTempDirectory().toFile()
         try { val src=File(root,"bad.pcm");src.writeBytes(byteArrayOf(1));try{ExperimentalPcmWavConverter(root).convert(src,16000,true);fail()}catch(_:Exception){} }
         finally { root.deleteRecursively() }
     }
     @Test fun refusesOutputCollision() {
-        val root=createTempDir()
+        val root=kotlin.io.path.createTempDirectory().toFile()
         try { val src=File(root,"audio.recovered.pcm");src.writeBytes(byteArrayOf(1,2));val out=File(root,"audio.recovered.wav");out.writeBytes(byteArrayOf(9));try{ExperimentalPcmWavConverter(root).convert(src,16000,true);fail()}catch(_:Exception){};assertArrayEquals(byteArrayOf(9),out.readBytes()) }
         finally { root.deleteRecursively() }
     }
