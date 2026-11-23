@@ -1,5 +1,6 @@
 package com.example.audio
 
+import kotlinx.coroutines.async
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.*
@@ -14,7 +15,7 @@ class LiveTranscriptionConnectionManagerTest {
         var failOpens = 0
         var timeoutOpens = 0
         var timeoutSends = 0
-        var failSend = false
+        var failSend = false\n        var sendDelayMs = 0L\n        var onSend: (() -> Unit)? = null
         override suspend fun open(sessionId: String, onPartial: (LiveTranscriptEntry) -> Unit, onFinal: (LiveTranscriptEntry) -> Unit) {
             openCalls++
             if (timeoutOpens > 0) { timeoutOpens--; delay(Long.MAX_VALUE) }
@@ -70,6 +71,36 @@ class LiveTranscriptionConnectionManagerTest {
         assertEquals(1, provider.sendCalls)
         assertEquals(2, provider.openCalls)
         manager.close()
+    }
+
+
+    @Test fun concurrentFrameSendsAreSerialized() = runTest {
+        val provider = FakeProvider()
+        var activeSends = 0
+        var maxActiveSends = 0
+        provider.sendDelayMs = 20
+        provider.onSend = {
+            activeSends++
+            maxActiveSends = maxOf(maxActiveSends, activeSends)
+            delay(provider.sendDelayMs)
+            activeSends--
+        }
+        val manager = LiveTranscriptionConnectionManager("s", provider, initialBackoffMs = 0, maxBackoffMs = 0)
+        assertTrue(manager.connect())
+        val first = async { manager.sendFrame(LiveAudioFrame("s", 1, 0, ByteArray(1))) }
+        val second = async { manager.sendFrame(LiveAudioFrame("s", 2, 1, ByteArray(1))) }
+        assertTrue(first.await())
+        assertTrue(second.await())
+        assertEquals(1, maxActiveSends)
+        manager.close()
+    }
+
+    @Test fun frameSendAfterCloseIsRejected() = runTest {
+        val provider = FakeProvider()
+        val manager = LiveTranscriptionConnectionManager("s", provider, initialBackoffMs = 0, maxBackoffMs = 0)
+        manager.close()
+        assertFalse(manager.sendFrame(LiveAudioFrame("s", 1, 0, ByteArray(1))))
+        assertEquals(0, provider.sendCalls)
     }
 
     @Test fun rejectsFramesForDifferentSessionAndClosedManager() = runTest {
