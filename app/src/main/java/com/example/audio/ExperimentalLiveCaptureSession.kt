@@ -2,13 +2,12 @@ package com.example.audio
 
 import android.content.Context
 import kotlinx.coroutines.CoroutineScope
+import java.io.File
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * Experimental orchestration for a single AudioRecord source feeding live STT.
- *
- * This is deliberately NOT wired to MeetingRecordingService or the durable recording
- * path. Until a PCM durable writer/encoder and recovery path exist, this session
- * must only be used in isolated experiments; it must not replace production recording.
+ * Isolated from MeetingRecordingService and the durable production recording path.
  */
 class ExperimentalLiveCaptureSession(
     context: Context,
@@ -17,45 +16,45 @@ class ExperimentalLiveCaptureSession(
     scope: CoroutineScope,
     sampleRateHz: Int = 16_000,
     queueCapacity: Int = 32,
-    onCaptureError: (String) -> Unit = {}
+    private val onCaptureError: (String) -> Unit = {}
 ) {
-    private val adapter = LiveCaptureTranscriptionAdapter(
-        sessionId = sessionId,
-        sampleRateHz = sampleRateHz,
-        queueCapacity = queueCapacity
-    )
+    private val adapter = LiveCaptureTranscriptionAdapter(sessionId, sampleRateHz, queueCapacity = queueCapacity)
     private val worker = LiveTranscriptionWorker(sessionId, adapter, provider, scope)
-    private val pcmWriter = ExperimentalPcmSegmentWriter(
-        directory = java.io.File(context.filesDir, "experimental_live_pcm"),
-        sessionId = sessionId,
-        sampleRateHz = sampleRateHz
-    )
+    private val pcmWriter = ExperimentalPcmSegmentWriter(File(context.filesDir, "experimental_live_pcm"), sessionId, sampleRateHz)
+    private val failureReported = AtomicBoolean(false)
+
     private val capture = AudioRecordCaptureEngine(
         context = context,
         sampleRateHz = sampleRateHz,
         onPcmRead = { bytes, timestamp ->
-            try {
-                pcmWriter.append(bytes)
-                adapter.acceptPcm(bytes, timestamp)
-            } catch (failure: Throwable) {
-                LiveTranscriptRepository.setStatus(sessionId, LiveTranscriptionStatus.DEGRADED, "Penyimpanan PCM eksperimental gagal: ${failure.localizedMessage ?: "error"}")
-                onCaptureError("Penyimpanan PCM eksperimental gagal.")
-            }
+            // Propagate writer/adapter failure to capture engine so capture stops, rather
+            // than repeatedly invoking a broken writer while microphone capture continues.
+            pcmWriter.append(bytes)
+            adapter.acceptPcm(bytes, timestamp)
         },
         onError = { message ->
             LiveTranscriptRepository.setStatus(sessionId, LiveTranscriptionStatus.DEGRADED, message)
-            onCaptureError(message)
+            if (failureReported.compareAndSet(false, true)) runCatching { onCaptureError(message) }
         }
     )
 
-    /** Starts STT worker and then capture; on capture startup failure, worker is stopped. */
+    @Synchronized
     fun start(): Boolean {
         if (capture.isCapturing) return true
-        try { pcmWriter.open() } catch (failure: Throwable) {
-            onCaptureError("Tidak dapat membuka file PCM eksperimental.")
+        failureReported.set(false)
+        try {
+            pcmWriter.open()
+        } catch (failure: Throwable) {
+            val message = "Tidak dapat membuka file PCM eksperimental."
+            LiveTranscriptRepository.setStatus(sessionId, LiveTranscriptionStatus.FALLBACK, message)
+            runCatching { onCaptureError(message) }
             return false
         }
-        worker.start()
+        if (!worker.start()) {
+            runCatching { pcmWriter.close() }
+            LiveTranscriptRepository.setStatus(sessionId, LiveTranscriptionStatus.FALLBACK, "Worker transkripsi tidak dapat dimulai.")
+            return false
+        }
         if (!capture.start()) {
             worker.stop()
             runCatching { pcmWriter.close() }
@@ -64,7 +63,8 @@ class ExperimentalLiveCaptureSession(
         return true
     }
 
-    /** Stops only this experimental capture and transcription pipeline. */
+    /** Stops this experimental pipeline; production recording is never touched. */
+    @Synchronized
     fun stop() {
         capture.stop()
         worker.stop()
