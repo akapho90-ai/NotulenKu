@@ -14,7 +14,7 @@ class ExperimentalPcmRecoveryAuditTrail(private val sessionRoot: File, private v
     private val log = File(dir, "recovery-audit.log")
 
     fun record(sessionId: String, type: RecoveryAuditEventType, artifacts: String = "", detail: String = ""): RecoveryAuditEvent =
-        ExperimentalRecoverySessionLock.withLock(sessionRoot, "__audit_log__") {
+        ExperimentalRecoverySessionLock.withRootLock(sessionRoot) {
             if (!dir.exists() && !dir.mkdirs()) throw IOException("Direktori audit tidak dapat dibuat.")
             val base = sessionRoot.canonicalFile
             val root = dir.canonicalFile
