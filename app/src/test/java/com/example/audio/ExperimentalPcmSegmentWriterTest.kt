@@ -59,6 +59,25 @@ class ExperimentalPcmSegmentWriterTest {
     }
 
     @Test
+    fun verifiedCheckpointBackupIsRestoredOnReopen() {
+        val dir=tempDir()
+        try {
+            val pcm=File(dir,"sessionE.pcm"); pcm.writeBytes(byteArrayOf(1,2,3,4))
+            val backup=File(dir,"sessionE.pcm.checkpoint.bak")
+            backup.writeText("session=sessionE\nformat=pcm16_mono\nsample_rate=16000\nbytes=4\n")
+            ExperimentalPcmSessionJournal(dir).write(
+                ExperimentalPcmSessionMetadata("sessionE",pcm.name,16000,status=ExperimentalPcmSessionStatus.RECOVERABLE,checkpointBytes=4,updatedAtEpochMs=5)
+            )
+            val writer=ExperimentalPcmSegmentWriter(dir,"sessionE")
+            writer.open()
+            writer.close()
+            assertEquals(4L,pcm.length())
+            assertTrue(File(dir,"sessionE.pcm.checkpoint").isFile)
+            assertFalse(backup.exists())
+        } finally { dir.deleteRecursively() }
+    }
+
+    @Test
     fun checkpointSessionOrFormatMismatchIsRejected() {
         val dir = tempDir()
         try {
