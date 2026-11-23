@@ -101,7 +101,7 @@ class LiveTranscriptionConnectionManager(
 
     private suspend fun disconnectQuietly() {
         connected = false
-        try { withTimeout(operationTimeoutMs) { provider.close() } } catch (_: Throwable) { }
+        try {\n            withTimeout(operationTimeoutMs) { provider.close() }\n        } catch (_: TimeoutCancellationException) {\n            // A close timeout is best-effort; do not block lifecycle cleanup indefinitely.\n        } catch (cancelled: CancellationException) {\n            throw cancelled\n        } catch (_: Throwable) {\n            // Provider close failures must not mask the original transport/lifecycle failure.\n        }
     }
 
     suspend fun close() {
