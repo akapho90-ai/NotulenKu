@@ -24,6 +24,15 @@ class ExperimentalPcmSessionJournalTest {
         } finally { dir.deleteRecursively() }
     }
 
+    @Test fun malformedJournalRecordIsIgnoredDuringListing() {
+        val dir=kotlin.io.path.createTempDirectory("pcm-journal-test").toFile()
+        try {
+            File(dir,"bad.pcm.journal").writeText("session=../outside\\nfile=../outside.pcm\\nsample_rate=16000\\nformat=pcm16_mono\\nstatus=RECOVERABLE\\ncheckpoint_bytes=4\\nupdated_at=1\\n")
+            File(dir,"odd.pcm.journal").writeText("session=odd\\nfile=odd.pcm\\nsample_rate=16000\\nformat=pcm16_mono\\nstatus=RECOVERABLE\\ncheckpoint_bytes=3\\nupdated_at=1\\n")
+            assertTrue(ExperimentalPcmSessionJournal(dir).list().isEmpty())
+        } finally { dir.deleteRecursively() }
+    }
+
     @Test fun validCheckpointGetsIntegrityHashAndOrphanIsRejected() {
         val dir=kotlin.io.path.createTempDirectory("pcm-journal-test").toFile()
         try {
