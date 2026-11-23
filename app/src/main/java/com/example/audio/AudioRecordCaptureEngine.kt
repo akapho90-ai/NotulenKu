@@ -10,13 +10,7 @@ import android.os.SystemClock
 import androidx.core.content.ContextCompat
 import java.util.concurrent.atomic.AtomicBoolean
 
-/**
- * Experimental microphone PCM capture, deliberately not wired into MeetingRecordingService.
- *
- * This engine emits copied PCM16 mono frames from AudioRecord. Callbacks run on its
- * capture thread. The caller must keep a durable recorder path separate until this
- * engine has been validated on supported devices.
- */
+/** Experimental PCM capture engine, intentionally not wired to the production recorder. */
 class AudioRecordCaptureEngine(
     private val context: Context,
     private val sampleRateHz: Int = 16_000,
@@ -27,64 +21,67 @@ class AudioRecordCaptureEngine(
     @Volatile private var recorder: AudioRecord? = null
     @Volatile private var captureThread: Thread? = null
 
+    @Synchronized
     fun start(): Boolean {
         if (running.get()) return true
+        // Reap any previous capture thread before creating a new recorder.
+        val oldThread = captureThread
+        if (oldThread != null && oldThread !== Thread.currentThread()) {
+            runCatching { oldThread.join(500L) }
+            if (oldThread.isAlive) {
+                report("Capture thread sebelumnya belum berhenti.")
+                return false
+            }
+            captureThread = null
+        }
         if (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
-            onError("Izin mikrofon belum diberikan.")
+            report("Izin mikrofon belum diberikan.")
             return false
         }
-
-        val minBuffer = AudioRecord.getMinBufferSize(
-            sampleRateHz,
-            AudioFormat.CHANNEL_IN_MONO,
-            AudioFormat.ENCODING_PCM_16BIT
-        )
+        val minBuffer = AudioRecord.getMinBufferSize(sampleRateHz, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT)
         if (minBuffer <= 0) {
-            onError("Ukuran buffer AudioRecord tidak valid: $minBuffer")
+            report("Ukuran buffer AudioRecord tidak valid: $minBuffer")
             return false
         }
-
         val bufferSize = maxOf(minBuffer * 2, sampleRateHz * 2 / 5)
         val created = try {
-            AudioRecord(
-                MediaRecorder.AudioSource.MIC,
-                sampleRateHz,
-                AudioFormat.CHANNEL_IN_MONO,
-                AudioFormat.ENCODING_PCM_16BIT,
-                bufferSize
-            )
+            AudioRecord(MediaRecorder.AudioSource.MIC, sampleRateHz, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT, bufferSize)
         } catch (e: Exception) {
-            onError("Gagal membuat AudioRecord: ${e.localizedMessage ?: "unknown error"}")
+            report("Gagal membuat AudioRecord: ${e.localizedMessage ?: "unknown error"}")
             return false
         }
-
         if (created.state != AudioRecord.STATE_INITIALIZED) {
             runCatching { created.release() }
-            onError("AudioRecord tidak berhasil diinisialisasi.")
+            report("AudioRecord tidak berhasil diinisialisasi.")
             return false
         }
-
-        if (!running.compareAndSet(false, true)) {
-            runCatching { created.release() }
-            return true
-        }
         recorder = created
+        running.set(true)
         try {
             created.startRecording()
             if (created.recordingState != AudioRecord.RECORDSTATE_RECORDING) {
-                stop()
-                onError("AudioRecord gagal memulai capture.")
+                releaseRecorder(created)
+                running.set(false)
+                report("AudioRecord gagal memulai capture.")
                 return false
             }
         } catch (e: Exception) {
-            stop()
-            onError("Gagal memulai capture: ${e.localizedMessage ?: "unknown error"}")
+            running.set(false)
+            releaseRecorder(created)
+            report("Gagal memulai capture: ${e.localizedMessage ?: "unknown error"}")
             return false
         }
-
         val thread = Thread({ captureLoop(created, bufferSize) }, "NotulenKu-PcmCapture")
         captureThread = thread
-        thread.start()
+        try {
+            thread.start()
+        } catch (e: Exception) {
+            running.set(false)
+            releaseRecorder(created)
+            captureThread = null
+            report("Thread capture gagal dimulai.")
+            return false
+        }
         return true
     }
 
@@ -94,16 +91,22 @@ class AudioRecordCaptureEngine(
             while (running.get()) {
                 val count = source.read(readBuffer, 0, readBuffer.size)
                 if (count > 0 && running.get()) {
-                    val copy = readBuffer.copyOf(count)
-                    runCatching { onPcmRead(copy, SystemClock.elapsedRealtime()) }
-                        .onFailure { onError("Callback PCM gagal: ${it.localizedMessage ?: "unknown error"}") }
+                    try {
+                        onPcmRead(readBuffer.copyOf(count), SystemClock.elapsedRealtime())
+                    } catch (failure: Throwable) {
+                        running.set(false)
+                        report("Callback PCM gagal; capture dihentikan: ${failure.localizedMessage ?: "unknown error"}")
+                        runCatching { if (source.recordingState == AudioRecord.RECORDSTATE_RECORDING) source.stop() }
+                        break
+                    }
                 } else if (count < 0 && running.get()) {
-                    onError("AudioRecord read error: $count")
+                    running.set(false)
+                    report("AudioRecord read error: $count")
                     break
                 }
             }
-        } catch (e: Exception) {
-            if (running.get()) onError("Capture berhenti: ${e.localizedMessage ?: "unknown error"}")
+        } catch (failure: Throwable) {
+            if (running.getAndSet(false)) report("Capture berhenti: ${failure.localizedMessage ?: "unknown error"}")
         } finally {
             running.set(false)
         }
@@ -113,17 +116,23 @@ class AudioRecordCaptureEngine(
     fun stop() {
         running.set(false)
         val source = recorder
-        recorder = null
-        if (source != null) {
-            runCatching { if (source.recordingState == AudioRecord.RECORDSTATE_RECORDING) source.stop() }
-            runCatching { source.release() }
-        }
+        if (source != null) releaseRecorder(source)
         val thread = captureThread
-        captureThread = null
         if (thread != null && thread !== Thread.currentThread()) {
-            runCatching { thread.join(500L) }
+            runCatching { thread.join(1_000L) }
+            if (!thread.isAlive) captureThread = null
+        } else if (thread === Thread.currentThread()) {
+            captureThread = null
         }
     }
+
+    private fun releaseRecorder(source: AudioRecord) {
+        if (recorder === source) recorder = null
+        runCatching { if (source.recordingState == AudioRecord.RECORDSTATE_RECORDING) source.stop() }
+        runCatching { source.release() }
+    }
+
+    private fun report(message: String) { runCatching { onError(message) } }
 
     val isCapturing: Boolean get() = running.get()
 }
