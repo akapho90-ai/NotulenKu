@@ -9,7 +9,7 @@ import java.io.File
 @RunWith(RobolectricTestRunner::class)
 class ExperimentalWavPlaybackValidatorTest {
     @Test fun rejectsMissingOrTooSmallFile() {
-        val root=createTempDir()
+        val root=kotlin.io.path.createTempDirectory().toFile()
         try {
             val result=ExperimentalWavPlaybackValidator().validate(File(root,"missing.wav"))
             assertEquals(WavValidationStatus.INVALID,result.status)
@@ -17,7 +17,7 @@ class ExperimentalWavPlaybackValidatorTest {
         } finally { root.deleteRecursively() }
     }
     @Test fun reportsWavTrackReadinessFromExtractor() {
-        val root=createTempDir()
+        val root=kotlin.io.path.createTempDirectory().toFile()
         try {
             val raw=File(root,"probe.recovered.pcm")
             raw.writeBytes(ByteArray(32000))
