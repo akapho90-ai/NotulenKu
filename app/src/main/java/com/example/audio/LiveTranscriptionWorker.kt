@@ -26,8 +26,12 @@ class LiveTranscriptionWorker(
                 onPartial = { LiveTranscriptRepository.upsert(sessionId, it.copy(isFinal = false)) },
                 onFinal = { LiveTranscriptRepository.upsert(sessionId, it.copy(isFinal = true)) }
             )
+            var connectionFailed = false
             try {
-                if (!manager.connect()) return@launch
+                if (!manager.connect()) {
+                    connectionFailed = true
+                    return@launch
+                }
                 var lastReportedDropCount = 0L
                 while (true) {
                     val frame = adapter.awaitFrame()
@@ -48,6 +52,9 @@ class LiveTranscriptionWorker(
                 LiveTranscriptRepository.setStatus(sessionId, LiveTranscriptionStatus.FALLBACK, failure.message ?: failure::class.java.simpleName)
             } finally {
                 try { manager.close() } catch (_: Throwable) { /* best effort */ }
+                if (connectionFailed) {
+                    LiveTranscriptRepository.setStatus(sessionId, LiveTranscriptionStatus.FALLBACK, "Provider tidak tersedia.")
+                }
             }
         }
         return true
