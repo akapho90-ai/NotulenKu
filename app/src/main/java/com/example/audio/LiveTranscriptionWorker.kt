@@ -5,10 +5,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 
-/**
- * Isolated consumer for the capture-to-transcription queue.
- * It never owns or stops the audio recorder.
- */
+/** Isolated consumer for the bounded capture-to-transcription queue. */
 class LiveTranscriptionWorker(
     private val sessionId: String,
     private val adapter: LiveCaptureTranscriptionAdapter,
@@ -31,10 +28,13 @@ class LiveTranscriptionWorker(
             )
             try {
                 if (!manager.connect()) return@launch
+                var lastReportedDropCount = 0L
                 while (true) {
                     val frame = adapter.awaitFrame()
                     manager.sendFrame(frame)
-                    if (adapter.droppedFrameCount > 0) {
+                    val dropped = adapter.droppedFrameCount
+                    if (dropped > lastReportedDropCount) {
+                        lastReportedDropCount = dropped
                         LiveTranscriptRepository.setStatus(
                             sessionId,
                             LiveTranscriptionStatus.DEGRADED,
@@ -45,12 +45,9 @@ class LiveTranscriptionWorker(
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (failure: Throwable) {
-                LiveTranscriptRepository.setStatus(
-                    sessionId, LiveTranscriptionStatus.FALLBACK,
-                    failure.message ?: failure::class.java.simpleName
-                )
+                LiveTranscriptRepository.setStatus(sessionId, LiveTranscriptionStatus.FALLBACK, failure.message ?: failure::class.java.simpleName)
             } finally {
-                try { manager.close() } catch (_: Throwable) { /* best-effort shutdown */ }
+                try { manager.close() } catch (_: Throwable) { /* best effort */ }
             }
         }
         return true
@@ -58,8 +55,9 @@ class LiveTranscriptionWorker(
 
     @Synchronized
     fun stop() {
-        job?.cancel()
+        val current = job
         job = null
+        current?.cancel()
         LiveTranscriptRepository.setStatus(sessionId, LiveTranscriptionStatus.STOPPED)
     }
 
