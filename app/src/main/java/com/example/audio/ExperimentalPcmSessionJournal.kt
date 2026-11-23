@@ -26,7 +26,7 @@ class ExperimentalPcmSessionJournal(private val directory: File) {
     @Synchronized
     fun write(metadata: ExperimentalPcmSessionMetadata) {
         safe(metadata.sessionId)
-        if (metadata.fileName != "${metadata.sessionId}.pcm" || metadata.fileName.contains("/") || metadata.fileName.contains("\\\\") || metadata.sampleRateHz <= 0 || metadata.checkpointBytes < 0 || metadata.checkpointBytes % 2L != 0L) {
+        if (metadata.fileName != "${metadata.sessionId}.pcm" || metadata.fileName.contains("/") || metadata.fileName.contains("\\\\") || metadata.sampleRateHz <= 0 || metadata.format != "pcm16_mono" || metadata.checkpointBytes < 0 || metadata.checkpointBytes % 2L != 0L) {
             throw IOException("Metadata journal PCM tidak valid.")
         }
         if (!directory.exists() && !directory.mkdirs()) throw IOException("Tidak dapat membuat direktori journal PCM.")
