@@ -6,7 +6,7 @@ import java.io.File
 
 class ExperimentalPcmRecoveryExecutorTest {
     @Test fun confirmationRequired() {
-        val root=createTempDir()
+        val root=kotlin.io.path.createTempDirectory().toFile()
         try {
             val metadata=ExperimentalPcmSessionMetadata("s1","s1.pcm",16000,status=ExperimentalPcmSessionStatus.RECOVERABLE,checkpointBytes=4,updatedAtEpochMs=1)
             val assessment=ExperimentalPcmRecoveryAssessment(metadata,File(root,"s1.pcm"),true,"",ExperimentalPcmIntegrityResult(true,true,true,true,4,null,emptyList()))
@@ -15,7 +15,7 @@ class ExperimentalPcmRecoveryExecutorTest {
         } finally { root.deleteRecursively() }
     }
     @Test fun copiesTrustedPrefixAndLeavesSourceUntouched() {
-        val root=createTempDir()
+        val root=kotlin.io.path.createTempDirectory().toFile()
         try {
             val source=File(root,"s1.pcm"); source.writeBytes(byteArrayOf(1,2,3,4,5,6))
             val metadata=ExperimentalPcmSessionMetadata("s1","s1.pcm",16000,status=ExperimentalPcmSessionStatus.RECOVERABLE,checkpointBytes=4,updatedAtEpochMs=1)
@@ -28,7 +28,7 @@ class ExperimentalPcmRecoveryExecutorTest {
         } finally { root.deleteRecursively() }
     }
     @Test fun refusesExistingOutput() {
-        val root=createTempDir()
+        val root=kotlin.io.path.createTempDirectory().toFile()
         try {
             val source=File(root,"s1.pcm"); source.writeBytes(byteArrayOf(1,2,3,4))
             val recovery=File(root,"recovered"); recovery.mkdirs(); File(recovery,"s1.recovered.pcm").writeBytes(byteArrayOf(9,9))
