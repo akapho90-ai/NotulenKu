@@ -15,7 +15,7 @@ class LiveTranscriptionConnectionManagerTest {
         var failOpens = 0
         var timeoutOpens = 0
         var timeoutSends = 0
-        var failSend = false\n        var sendDelayMs = 0L\n        var onSend: (() -> Unit)? = null
+        var failSend = false\n        var sendDelayMs = 0L\n        var onSend: (suspend () -> Unit)? = null
         override suspend fun open(sessionId: String, onPartial: (LiveTranscriptEntry) -> Unit, onFinal: (LiveTranscriptEntry) -> Unit) {
             openCalls++
             if (timeoutOpens > 0) { timeoutOpens--; delay(Long.MAX_VALUE) }
