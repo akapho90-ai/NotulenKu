@@ -9,7 +9,7 @@ import java.io.File
 @RunWith(RobolectricTestRunner::class)
 class ExperimentalPcmRecoveryPipelineTest {
     @Test fun refusesWithoutExplicitConfirmation() {
-        val root=createTempDir()
+        val root=kotlin.io.path.createTempDirectory().toFile()
         try {
             val source=File(root,"s1.pcm");source.writeBytes(ByteArray(32000))
             val metadata=ExperimentalPcmSessionMetadata("s1","s1.pcm",16000,status=ExperimentalPcmSessionStatus.RECOVERABLE,checkpointBytes=32000,updatedAtEpochMs=1)
@@ -21,7 +21,7 @@ class ExperimentalPcmRecoveryPipelineTest {
         } finally { root.deleteRecursively() }
     }
     @Test fun rejectedAssessmentDoesNotCreateRecoveryFiles() {
-        val root=createTempDir()
+        val root=kotlin.io.path.createTempDirectory().toFile()
         try {
             val assessment=ExperimentalPcmRecoveryAssessment(null,File(root,"orphan.pcm"),false,"orphan")
             val result=ExperimentalPcmRecoveryPipeline(root).run(assessment,true)
@@ -31,7 +31,7 @@ class ExperimentalPcmRecoveryPipelineTest {
         } finally { root.deleteRecursively() }
     }
     @Test fun preflightReportCollisionDoesNotCopyRecoveryPcm() {
-        val root=createTempDir()
+        val root=kotlin.io.path.createTempDirectory().toFile()
         try {
             val source=File(root,"s1.pcm");source.writeBytes(ByteArray(32000))
             val metadata=ExperimentalPcmSessionMetadata("s1","s1.pcm",16000,status=ExperimentalPcmSessionStatus.RECOVERABLE,checkpointBytes=32000,updatedAtEpochMs=1)
