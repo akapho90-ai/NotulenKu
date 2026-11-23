@@ -51,7 +51,8 @@ class ExperimentalPcmSegmentWriterTest {
             ExperimentalPcmSessionJournal(dir).write(
                 ExperimentalPcmSessionMetadata("sessionC", pcm.name, 16000, status=ExperimentalPcmSessionStatus.RECOVERABLE, checkpointBytes=4, updatedAtEpochMs=3)
             )
-            val writer = ExperimentalPcmSegmentWriter(dir, "sessionC")\n            writer.open()\n            writer.close()
+            val writer = ExperimentalPcmSegmentWriter(dir, "sessionC")
+            writer.open()\n            writer.close()
             assertEquals(4L, pcm.length())
         } finally { dir.deleteRecursively() }
     }
