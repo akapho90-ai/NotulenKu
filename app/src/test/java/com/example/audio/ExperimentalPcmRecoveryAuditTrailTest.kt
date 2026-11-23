@@ -5,7 +5,7 @@ import org.junit.Test
 
 class ExperimentalPcmRecoveryAuditTrailTest {
     @Test fun roundTripEventsAndFilterSession() {
-        val root=createTempDir()
+        val root=kotlin.io.path.createTempDirectory().toFile()
         try {
             var time=10L
             val trail=ExperimentalPcmRecoveryAuditTrail(root){time++}
@@ -20,7 +20,7 @@ class ExperimentalPcmRecoveryAuditTrailTest {
         } finally { root.deleteRecursively() }
     }
     @Test fun missingLogReturnsEmpty() {
-        val root=createTempDir()
+        val root=kotlin.io.path.createTempDirectory().toFile()
         try { assertTrue(ExperimentalPcmRecoveryAuditTrail(root).readAll().isEmpty()) }
         finally { root.deleteRecursively() }
     }
