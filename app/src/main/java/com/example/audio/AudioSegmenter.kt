@@ -294,12 +294,14 @@ object AudioSegmenter {
             Result.success(destFile)
         } catch (e: Exception) {
             Log.e(TAG, "Failed extracting valid audio segment", e)
-            runCatching { muxer?.release() }
-            runCatching { extractor.release() }
             runCatching { if (destFile.exists()) destFile.delete() }
             Result.failure(
                 IllegalStateException("Gagal memecah audio panjang secara aman: ${e.localizedMessage ?: "format tidak didukung"}")
             )
+        } finally {
+            // Ensure resources are released even for early Result.failure returns (e.g. unsupported track).
+            runCatching { muxer?.release() }
+            runCatching { extractor.release() }
         }
     }
 
