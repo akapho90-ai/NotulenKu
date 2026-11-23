@@ -152,6 +152,7 @@ object AudioSegmenter {
         knownDurationSec: Long,
         chunkDurationSec: Long = DEFAULT_CHUNK_DURATION_SEC
     ): Result<List<PreparedAudioChunk>> {
+        if (!isSafeSessionId(sessionId)) return Result.failure(IllegalArgumentException("ID sesi tidak aman untuk direktori chunk."))
         if (!sourceFile.exists() || sourceFile.length() <= 0L) {
             return Result.failure(IllegalArgumentException("Berkas audio asli tidak ditemukan atau kosong."))
         }
@@ -173,7 +174,13 @@ object AudioSegmenter {
             )
         }
 
-        val chunkDir = File(context.cacheDir, "transcription_chunks/$sessionId").apply { mkdirs() }
+        val chunkBase = File(context.cacheDir, "transcription_chunks")
+        val chunkDir = File(chunkBase, sessionId)
+        if (!chunkBase.mkdirs() && !chunkBase.isDirectory) return Result.failure(IllegalStateException("Direktori chunk tidak dapat dibuat."))
+        if (!chunkDir.mkdirs() && !chunkDir.isDirectory) return Result.failure(IllegalStateException("Direktori sesi chunk tidak dapat dibuat."))
+        val canonicalBase = runCatching { chunkBase.canonicalFile }.getOrElse { return Result.failure(it) }
+        val canonicalChunkDir = runCatching { chunkDir.canonicalFile }.getOrElse { return Result.failure(it) }
+        if (canonicalChunkDir.parentFile != canonicalBase) return Result.failure(IllegalStateException("Path chunk sesi tidak aman."))
         // Adjust chunk duration downward if bitrate is high so each chunk stays safely under 8 MB
         val bytesPerSec = (sourceFile.length().toDouble() / detectedDurationSec.toDouble()).coerceAtLeast(1000.0)
         val sizeSafeChunkSec = ((MAX_DIRECT_UPLOAD_BYTES * 0.75) / bytesPerSec).toLong().coerceIn(60L, chunkDurationSec)
@@ -467,12 +474,16 @@ object AudioSegmenter {
     }
 
     fun cleanupTempChunkDir(context: Context, sessionId: String) {
-        if (sessionId.isBlank()) return
-        val dir = File(context.cacheDir, "transcription_chunks/$sessionId")
-        if (dir.exists()) {
-            runCatching { dir.deleteRecursively() }
-        }
+        if (!isSafeSessionId(sessionId)) return
+        val base = File(context.cacheDir, "transcription_chunks")
+        val dir = File(base, sessionId)
+        val baseCanonical = runCatching { base.canonicalFile }.getOrNull() ?: return
+        val dirCanonical = runCatching { dir.canonicalFile }.getOrNull() ?: return
+        if (dirCanonical.parentFile == baseCanonical && dir.isDirectory) runCatching { dir.deleteRecursively() }
     }
+
+    private fun isSafeSessionId(sessionId: String): Boolean =
+        sessionId.matches(Regex("[A-Za-z0-9_-]{1,128}"))
 
     private fun findAudioTrackIndex(extractor: MediaExtractor): Int {
         for (i in 0 until extractor.trackCount) {
