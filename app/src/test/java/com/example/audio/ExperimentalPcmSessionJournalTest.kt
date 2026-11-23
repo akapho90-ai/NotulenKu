@@ -55,7 +55,7 @@ class ExperimentalPcmSessionJournalTest {
             val journal=ExperimentalPcmSessionJournal(dir)
             val target=File(dir,"tempRecover.pcm.journal")
             val temp=File(dir,target.name+".tmp")
-            temp.writeText("session=tempRecover\\nfile=tempRecover.pcm\\nsample_rate=16000\\nformat=pcm16_mono\\nstatus=RECOVERABLE\\ncheckpoint_bytes=2\\nupdated_at=11\\n")
+            temp.writeText("session=tempRecover\nfile=tempRecover.pcm\nsample_rate=16000\nformat=pcm16_mono\nstatus=RECOVERABLE\ncheckpoint_bytes=2\nupdated_at=11\n")
             val restored=journal.list()
             assertTrue(restored.any { it.sessionId=="tempRecover" && it.checkpointBytes==2L })
             assertTrue(target.isFile)
