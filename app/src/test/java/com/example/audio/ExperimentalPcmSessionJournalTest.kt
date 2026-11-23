@@ -10,7 +10,7 @@ class ExperimentalPcmSessionJournalTest {
         File(dir, file.name + ".checkpoint").writeText("session=$id\nformat=pcm16_mono\nsample_rate=16000\nbytes=$bytes\n")
     }
     @Test fun validCheckpointGetsIntegrityHashAndOrphanIsRejected() {
-        val dir=createTempDir(prefix="pcm-journal-test")
+        val dir=kotlin.io.path.createTempDirectory("pcm-journal-test").toFile()
         try {
             val pcm=File(dir,"sessionA.pcm"); pcm.writeBytes(byteArrayOf(1,2,3,4))
             checkpoint(dir,pcm,"sessionA",4)
@@ -22,7 +22,7 @@ class ExperimentalPcmSessionJournalTest {
         } finally { dir.deleteRecursively() }
     }
     @Test fun checkpointBeyondFileIsRejected() {
-        val dir=createTempDir(prefix="pcm-journal-test")
+        val dir=kotlin.io.path.createTempDirectory("pcm-journal-test").toFile()
         try {
             val pcm=File(dir,"sessionB.pcm"); pcm.writeBytes(byteArrayOf(1,2))
             checkpoint(dir,pcm,"sessionB",4)
@@ -31,7 +31,7 @@ class ExperimentalPcmSessionJournalTest {
         } finally { dir.deleteRecursively() }
     }
     @Test fun checkpointJournalMismatchRejected() {
-        val dir=createTempDir(prefix="pcm-journal-test")
+        val dir=kotlin.io.path.createTempDirectory("pcm-journal-test").toFile()
         try {
             val pcm=File(dir,"sessionC.pcm"); pcm.writeBytes(byteArrayOf(1,2,3,4))
             checkpoint(dir,pcm,"sessionC",2)
