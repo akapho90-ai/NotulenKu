@@ -2,7 +2,7 @@ name: Build NotulenKu Debug APK
 
 on:
   push:
-    branches: [main]
+    branches: [main, feature/live-transcription-foundation]
     paths:
       - 'app/**'
       - 'gradle/**'
@@ -83,6 +83,9 @@ jobs:
             echo '::error::Firebase config must match the project, package, Web OAuth client, and registered debug SHA-1.'
             exit 1
           fi
+
+      - name: Run unit and Robolectric regression tests
+        run: gradle :app:testDebugUnitTest --no-daemon --no-configuration-cache --stacktrace
 
       - name: Build signed debug APK
         env:
