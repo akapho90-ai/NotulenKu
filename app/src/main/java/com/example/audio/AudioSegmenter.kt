@@ -178,6 +178,7 @@ object AudioSegmenter {
         val chunkDir = File(chunkBase, sessionId)
         if (!chunkBase.mkdirs() && !chunkBase.isDirectory) return Result.failure(IllegalStateException("Direktori chunk tidak dapat dibuat."))
         if (!chunkDir.mkdirs() && !chunkDir.isDirectory) return Result.failure(IllegalStateException("Direktori sesi chunk tidak dapat dibuat."))
+        if (chunkDir.listFiles()?.isNotEmpty() == true) return Result.failure(IllegalStateException("Direktori chunk sesi sudah berisi file; hindari penggunaan ulang artefak lama."))
         val canonicalBase = runCatching { chunkBase.canonicalFile }.getOrElse { return Result.failure(it) }
         val canonicalChunkDir = runCatching { chunkDir.canonicalFile }.getOrElse { return Result.failure(it) }
         if (canonicalChunkDir.parentFile != canonicalBase) return Result.failure(IllegalStateException("Path chunk sesi tidak aman."))
@@ -189,6 +190,7 @@ object AudioSegmenter {
         val chunks = mutableListOf<PreparedAudioChunk>()
         for (window in windows) {
             val outFile = File(chunkDir, "chunk_${"%04d".format(window.index)}.m4a")
+            if (outFile.exists()) return Result.failure(IllegalStateException("File chunk tujuan sudah ada; ekstraksi dibatalkan."))
             val extractRes = extractValidM4aSegment(
                 sourceFile = sourceFile,
                 destFile = outFile,
@@ -198,6 +200,7 @@ object AudioSegmenter {
             if (extractRes.isFailure) {
                 // Clean partial temp chunks only (NEVER touch sourceFile)
                 chunks.filter { it.isTempChunk }.forEach { runCatching { it.file.delete() } }
+                runCatching { chunkDir.deleteRecursively() }
                 return Result.failure(
                     extractRes.exceptionOrNull()
                         ?: IllegalStateException("Gagal memecah audio panjang menjadi segmen valid.")
@@ -217,6 +220,11 @@ object AudioSegmenter {
             }
         }
 
+        if (chunks.size != windows.size) {
+            chunks.filter { it.isTempChunk }.forEach { runCatching { it.file.delete() } }
+            runCatching { chunkDir.deleteRecursively() }
+            return Result.failure(IllegalStateException("Jumlah chunk hasil tidak cocok dengan rencana pemotongan."))
+        }
         if (chunks.isEmpty()) {
             return Result.failure(IllegalStateException("Tidak ada segmen audio valid yang dapat diproses."))
         }
