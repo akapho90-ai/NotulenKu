@@ -52,7 +52,7 @@ class ExperimentalPcmSessionJournal(private val directory: File) {
                 throw IOException("Tidak dapat membersihkan backup journal.")
             }
             if (!file.renameTo(backup)) throw IOException("Tidak dapat menyimpan backup journal.")
-        } else if (file.exists() && !archiveInvalid(file)) {
+        } else if (file.exists() && !archiveInvalidPcmRecord(file)) {
             throw IOException("Tidak dapat mengarsipkan journal PCM yang tidak valid.")
         }
 
