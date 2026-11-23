@@ -18,16 +18,26 @@ data class ExperimentalPcmSessionMetadata(
 
 class ExperimentalPcmSessionJournal internal constructor(
     private val directory: File,
-    private val persistence: PcmPersistenceIo
+    private val persistence: PcmPersistenceIo,
+    private val writerOwner: Any? = null
 ) {
     constructor(directory: File) : this(directory, DefaultPcmPersistenceIo)
 
     private val sessionIdPattern = Regex("[A-Za-z0-9_-]{1,128}")
+    private val journalNamePattern = Regex("([A-Za-z0-9_-]{1,128})\\.pcm\\.journal(?:\\.(?:bak|tmp))?")
 
-    @Synchronized
     fun write(metadata: ExperimentalPcmSessionMetadata) {
         if (!isValid(metadata)) throw IOException("Metadata journal PCM tidak valid.")
-        if (!directory.exists() && !directory.mkdirs()) throw IOException("Tidak dapat membuat direktori journal PCM.")
+        ExperimentalRecoverySessionLock.withSourceLock(directory, metadata.sessionId) {
+            requireWriterAccess(writerOwner)
+            writeLocked(metadata)
+        }
+    }
+
+    private fun writeLocked(metadata: ExperimentalPcmSessionMetadata) {
+        if (!directory.exists() && !directory.mkdirs() && !directory.isDirectory) {
+            throw IOException("Tidak dapat membuat direktori journal PCM.")
+        }
 
         val file = File(directory, "${metadata.fileName}.journal")
         val backup = File(directory, file.name + ".bak")
@@ -72,7 +82,12 @@ class ExperimentalPcmSessionJournal internal constructor(
         if (backup.isFile) backup.delete()
     }
 
-    fun read(file: File): ExperimentalPcmSessionMetadata? = runCatching { readRecord(file) }.getOrNull()
+    fun read(file: File): ExperimentalPcmSessionMetadata? {
+        val sessionId = journalSessionId(file.name) ?: return null
+        return runCatching {
+            ExperimentalRecoverySessionLock.withSourceLock(file.absoluteFile.parentFile!!, sessionId) { readRecord(file) }
+        }.getOrNull()
+    }
 
     // A malformed record can be replaced. An I/O error must leave the files alone.
     private fun readRecord(file: File): ExperimentalPcmSessionMetadata? {
@@ -133,38 +148,36 @@ class ExperimentalPcmSessionJournal internal constructor(
 
     internal fun recoverForSession(sessionId: String): ExperimentalPcmSessionMetadata? {
         require(sessionIdPattern.matches(sessionId))
-        val target = File(directory, "$sessionId.pcm.journal")
-        recoverPromotion(target)
-        val record = readRecord(target)
-        if (record != null) return record
-        val sidecars = listOf(target, File(directory, target.name + ".bak"), File(directory, target.name + ".tmp"))
-        if (sidecars.any(File::exists)) {
-            throw IOException("Journal PCM tidak dapat digunakan untuk memverifikasi checkpoint.")
+        return ExperimentalRecoverySessionLock.withSourceLock(directory, sessionId) {
+            val target = File(directory, "$sessionId.pcm.journal")
+            recoverPromotion(target)
+            val record = readRecord(target)
+            if (record != null) return@withSourceLock record
+            val sidecars = listOf(target, File(directory, target.name + ".bak"), File(directory, target.name + ".tmp"))
+            if (sidecars.any(File::exists)) {
+                throw IOException("Journal PCM tidak dapat digunakan untuk memverifikasi checkpoint.")
+            }
+            null
         }
-        return null
     }
 
-    fun list(): List<ExperimentalPcmSessionMetadata> {
-        val targets = directory.listFiles()?.filter { f ->
-            f.isFile && (f.name.endsWith(".pcm.journal") ||
-                f.name.endsWith(".pcm.journal.bak") || f.name.endsWith(".pcm.journal.tmp"))
-        }?.map { f ->
-            when {
-                f.name.endsWith(".pcm.journal.bak") -> File(directory, f.name.removeSuffix(".bak"))
-                f.name.endsWith(".pcm.journal.tmp") -> File(directory, f.name.removeSuffix(".tmp"))
-                else -> f
-            }
-        }?.distinctBy { it.name } ?: emptyList()
-        for (target in targets) {
-            try {
-                recoverPromotion(target)
-            } catch (_: IOException) {
-                // Leave unreadable records for a later attempt and continue listing other sessions.
-            }
+    private fun journalSessionId(name: String): String? = journalNamePattern.matchEntire(name)?.groupValues?.get(1)
+
+    internal fun listSessionIds(): List<String> =
+        directory.list().orEmpty().mapNotNull(::journalSessionId).distinct()
+
+    internal fun recoverForListing(sessionId: String): ExperimentalPcmSessionMetadata? {
+        if (!sessionIdPattern.matches(sessionId)) return null
+        return try {
+            recoverForSession(sessionId)
+        } catch (_: IOException) {
+            // Leave unreadable records for a later attempt and continue listing other sessions.
+            null
         }
-        return directory.listFiles { f -> f.isFile && f.name.endsWith(".pcm.journal") }
-            ?.mapNotNull(::read)?.sortedByDescending { it.updatedAtEpochMs } ?: emptyList()
     }
+
+    fun list(): List<ExperimentalPcmSessionMetadata> =
+        listSessionIds().mapNotNull(::recoverForListing).sortedByDescending { it.updatedAtEpochMs }
 }
 
 internal fun archiveInvalidPcmRecord(target: File, persistence: PcmPersistenceIo): Boolean {
@@ -192,7 +205,12 @@ data class ExperimentalPcmIntegrityResult(
 
 /** Read-only checks of metadata, checkpoint consistency, alignment and trusted-byte SHA-256. */
 class ExperimentalPcmIntegrityVerifier(private val directory: File) {
-    fun verify(metadata: ExperimentalPcmSessionMetadata, pcmFile: File): ExperimentalPcmIntegrityResult {
+    fun verify(metadata: ExperimentalPcmSessionMetadata, pcmFile: File): ExperimentalPcmIntegrityResult =
+        ExperimentalRecoverySessionLock.withSourceLock(directory, metadata.sessionId) {
+            verifyLocked(metadata, pcmFile)
+        }
+
+    private fun verifyLocked(metadata: ExperimentalPcmSessionMetadata, pcmFile: File): ExperimentalPcmIntegrityResult {
         val issues=mutableListOf<String>()
         val expected=File(directory,metadata.fileName).canonicalFile
         val base=directory.canonicalFile
@@ -246,23 +264,37 @@ class ExperimentalPcmRecoveryManager(private val directory: File) {
     private val verifier=ExperimentalPcmIntegrityVerifier(directory)
 
     fun assessAll(): List<ExperimentalPcmRecoveryAssessment> {
-        val records=journal.list()
-        val assessments=records.map { record ->
-            val file=File(directory,record.fileName)
-            val integrity=verifier.verify(record,file)
-            val valid=integrity.metadataValid && integrity.checkpointValid && integrity.fileSizeAligned &&
-                integrity.checkpointMatchesJournal && integrity.trustedBytes!=null &&
-                record.status!=ExperimentalPcmSessionStatus.FINALIZED && record.status!=ExperimentalPcmSessionStatus.FAILED
-            ExperimentalPcmRecoveryAssessment(record,file,valid,when {
-                record.status==ExperimentalPcmSessionStatus.FINALIZED -> "Sesi sudah final."
-                record.status==ExperimentalPcmSessionStatus.FAILED -> "Sesi ditandai gagal."
-                valid -> "Pemeriksaan integritas dasar lulus; hash SHA-256 tersedia, belum diuji playback."
-                else -> integrity.issues.joinToString(" ")
-            },integrity)
+        val fileNames = journal.listSessionIds().map { "$it.pcm" }.toMutableSet()
+        fileNames.addAll(directory.list { _, name -> name.endsWith(".pcm") }.orEmpty())
+
+        // Directory membership can change while scanning, but each session is read as one snapshot.
+        return fileNames.mapNotNull { name ->
+            val sessionId = name.removeSuffix(".pcm")
+            ExperimentalRecoverySessionLock.withSourceLock(directory, sessionId) {
+                val record = journal.recoverForListing(sessionId)
+                val file = File(directory, name)
+                when {
+                    record != null -> assess(record, file)
+                    file.isFile -> ExperimentalPcmRecoveryAssessment(
+                        null, file, false, "File PCM tanpa journal; metadata dan checkpoint tidak dapat dipercaya."
+                    )
+                    else -> null
+                }
+            }
+        }.sortedByDescending { it.metadata?.updatedAtEpochMs }
+    }
+
+    private fun assess(record: ExperimentalPcmSessionMetadata, file: File): ExperimentalPcmRecoveryAssessment {
+        val integrity = verifier.verify(record, file)
+        val valid = integrity.metadataValid && integrity.checkpointValid && integrity.fileSizeAligned &&
+            integrity.checkpointMatchesJournal && integrity.trustedBytes != null &&
+            record.status != ExperimentalPcmSessionStatus.FINALIZED && record.status != ExperimentalPcmSessionStatus.FAILED
+        val reason = when {
+            record.status == ExperimentalPcmSessionStatus.FINALIZED -> "Sesi sudah final."
+            record.status == ExperimentalPcmSessionStatus.FAILED -> "Sesi ditandai gagal."
+            valid -> "Pemeriksaan integritas dasar lulus; hash SHA-256 tersedia, belum diuji playback."
+            else -> integrity.issues.joinToString(" ")
         }
-        val known=records.map { it.fileName }.toSet()
-        val orphans=directory.listFiles { f -> f.isFile && f.name.endsWith(".pcm") && f.name !in known }
-            ?.map { f -> ExperimentalPcmRecoveryAssessment(null,f,false,"File PCM tanpa journal; metadata dan checkpoint tidak dapat dipercaya.") } ?: emptyList()
-        return assessments+orphans
+        return ExperimentalPcmRecoveryAssessment(record, file, valid, reason, integrity)
     }
 }

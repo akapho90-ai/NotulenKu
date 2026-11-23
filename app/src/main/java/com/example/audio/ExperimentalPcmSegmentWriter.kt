@@ -34,28 +34,42 @@ class ExperimentalPcmSegmentWriter internal constructor(
     private var bytesWritten = 0L
     private var bytesSinceFlush = 0
     private var failed = false
-    private val journal = ExperimentalPcmSessionJournal(directory, persistence)
+    private val owner = Any()
+    private val journal = ExperimentalPcmSessionJournal(directory, persistence, owner)
 
     init {
         require(sampleRateHz > 0)
         require(flushIntervalBytes > 0)
     }
 
-    @Synchronized
-    fun open(): File {
+    fun open(): File = ExperimentalRecoverySessionLock.withSourceLock(directory, safeSessionId) { openLocked() }
+
+    private fun ExperimentalRecoverySessionLock.SourceSession.openLocked(): File {
         if (failed) throw IOException("Writer PCM sudah berada pada status FAILED.")
         if (stream != null) return file
-        if (!directory.exists() && !directory.mkdirs()) throw IOException("Tidak dapat membuat direktori PCM.")
-        reconcileExistingFile()
-        rawStream = FileOutputStream(file, true)
-        stream = BufferedOutputStream(rawStream!!)
+        claimWriter(owner)
+        var opened = false
         try {
-            writeCheckpoint(force = true)
-        } catch (e: Exception) {
-            failWriter(fallbackCheckpointBytes = bytesWritten)
-            throw e
+            if (!directory.exists() && !directory.mkdirs() && !directory.isDirectory) {
+                throw IOException("Tidak dapat membuat direktori PCM.")
+            }
+            reconcileExistingFile()
+            rawStream = FileOutputStream(file, true)
+            stream = BufferedOutputStream(rawStream!!)
+            try {
+                writeCheckpoint(force = true)
+            } catch (e: Exception) {
+                failWriter(fallbackCheckpointBytes = bytesWritten)
+                throw e
+            }
+            opened = true
+            return file
+        } finally {
+            if (!opened) {
+                closeStreams()
+                releaseWriter(owner)
+            }
         }
-        return file
     }
 
     private fun recoverCheckpoint(actualPcmBytes: Long): Long {
@@ -111,11 +125,10 @@ class ExperimentalPcmSegmentWriter internal constructor(
         bytesWritten = trustedBytes
     }
 
-    @Synchronized
-    fun append(pcm: ByteArray) {
+    fun append(pcm: ByteArray): Unit = ExperimentalRecoverySessionLock.withSourceLock(directory, safeSessionId) {
         if (failed) throw IOException("Writer PCM gagal; append dihentikan.")
-        if (stream == null) open()
-        if (pcm.isEmpty()) return
+        if (stream == null) openLocked()
+        if (pcm.isEmpty()) return@withSourceLock
         try {
             if (pcm.size % 2 != 0) throw IOException("Frame PCM16 memiliki jumlah byte ganjil.")
             persistence.write(file, stream!!, pcm)
@@ -123,7 +136,11 @@ class ExperimentalPcmSegmentWriter internal constructor(
             bytesSinceFlush += pcm.size
             if (bytesSinceFlush >= flushIntervalBytes) writeCheckpoint(force = false)
         } catch (e: Exception) {
-            failWriter()
+            try {
+                failWriter()
+            } finally {
+                releaseWriter(owner)
+            }
             throw e
         }
     }
@@ -175,19 +192,15 @@ class ExperimentalPcmSegmentWriter internal constructor(
         failed = true
         runCatching { stream?.let { persistence.flush(file, it) } }
         runCatching { rawStream?.let { persistence.sync(file, it.fd) } }
-        runCatching { stream?.close() }
-        stream = null
-        rawStream = null
+        closeStreams()
         runCatching {
             val trustedBytes = journal.recoverForSession(safeSessionId)?.checkpointBytes ?: fallbackCheckpointBytes
             journal.write(metadata(ExperimentalPcmSessionStatus.FAILED).copy(checkpointBytes = trustedBytes))
         }
     }
 
-    @Synchronized
-    override fun close() {
-        val out = stream ?: return
-        if (failed) { runCatching { out.close() }; stream = null; rawStream = null; return }
+    override fun close(): Unit = ExperimentalRecoverySessionLock.withSourceLock(directory, safeSessionId) {
+        val out = stream ?: return@withSourceLock
         try {
             persistence.flush(file, out)
             rawStream?.let { persistence.sync(file, it.fd) }
@@ -197,10 +210,16 @@ class ExperimentalPcmSegmentWriter internal constructor(
             failWriter()
             throw e
         } finally {
-            runCatching { out.close() }
-            stream = null
-            rawStream = null
+            closeStreams()
+            releaseWriter(owner)
         }
+    }
+
+    private fun closeStreams() {
+        val buffered = stream
+        runCatching { buffered?.close() ?: rawStream?.close() }
+        stream = null
+        rawStream = null
     }
 
     private fun metadata(status: ExperimentalPcmSessionStatus) = ExperimentalPcmSessionMetadata(
@@ -214,7 +233,8 @@ class ExperimentalPcmSegmentWriter internal constructor(
     }
 
     val currentFile: File get() = file
-    val totalBytes: Long get() = bytesWritten
+    val totalBytes: Long
+        get() = ExperimentalRecoverySessionLock.withSourceLock(directory, safeSessionId) { bytesWritten }
 }
 
 /** Returns null for malformed or mismatched metadata. I/O errors leave recovery blocked. */

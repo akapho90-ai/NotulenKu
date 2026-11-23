@@ -11,6 +11,7 @@ class ExperimentalPcmRecoveryExecutor(private val rootDirectory: File) {
     fun execute(assessment: ExperimentalPcmRecoveryAssessment, decision: PcmRecoveryDecision, userConfirmed: Boolean): PcmRecoveryExecutionResult {
         val metadata = assessment.metadata ?: throw IOException("Metadata sesi tidak tersedia.")
         return ExperimentalRecoverySessionLock.withLock(rootDirectory, metadata.sessionId) {
+            requireWriterAccess()
             executeLocked(assessment, decision, userConfirmed)
         }
     }
@@ -22,11 +23,15 @@ class ExperimentalPcmRecoveryExecutor(private val rootDirectory: File) {
         val source = assessment.pcmFile ?: throw IOException("File sumber tidak tersedia.")
         val integrity = assessment.integrity ?: throw IOException("Integrity assessment tidak tersedia.")
         val root = rootDirectory.canonicalFile
-        if (!source.isFile || source.canonicalFile.parentFile != root) throw IOException("File sumber tidak aman atau tidak ditemukan.")
+        val canonicalSource = source.canonicalFile
+        if (!source.isFile || canonicalSource.parentFile != root || canonicalSource.name != metadata.fileName ||
+            metadata.fileName != "${metadata.sessionId}.pcm"
+        ) throw IOException("File sumber tidak aman atau tidak ditemukan.")
         if (!integrity.metadataValid || !integrity.checkpointValid || !integrity.checkpointMatchesJournal ||
             integrity.trustedBytes != decision.trustedBytes || decision.trustedBytes <= 0L ||
             decision.trustedBytes % 2L != 0L || decision.trustedBytes > source.length() ||
             metadata.format != "pcm16_mono" || metadata.sampleRateHz <= 0) throw IOException("Assessment atau batas byte tepercaya tidak valid.")
+        verifyCurrentCheckpoint(root, source, metadata, decision.trustedBytes)
         val recoveryDir = File(root, "recovered")
         if (!recoveryDir.exists() && !recoveryDir.mkdirs()) throw IOException("Direktori recovery tidak dapat dibuat.")
         if (recoveryDir.canonicalFile.parentFile != root) throw IOException("Direktori recovery tidak aman.")
@@ -70,6 +75,20 @@ class ExperimentalPcmRecoveryExecutor(private val rootDirectory: File) {
             reportTemp.delete()
             if (outputPromoted) output.delete()
             throw e
+        }
+    }
+
+    private fun verifyCurrentCheckpoint(root: File, source: File, expected: ExperimentalPcmSessionMetadata, trustedBytes: Long) {
+        val journal = File(root, expected.fileName + ".journal")
+        val journalArtifacts = listOf(journal, File(root, journal.name + ".bak"), File(root, journal.name + ".tmp"))
+        if (journalArtifacts.none(File::exists)) return
+        val current = ExperimentalPcmSessionJournal(root).read(journal)
+        val checkpoint = File(root, expected.fileName + ".checkpoint")
+        if (current == null || current.sampleRateHz != expected.sampleRateHz || current.checkpointBytes != trustedBytes ||
+            current.status == ExperimentalPcmSessionStatus.FINALIZED || current.status == ExperimentalPcmSessionStatus.FAILED ||
+            readPcmCheckpointBytes(checkpoint, current.sessionId, current.fileName, current.sampleRateHz, source.length()) != trustedBytes
+        ) {
+            throw IOException("Checkpoint sesi berubah sejak pemeriksaan. Periksa kembali sebelum pemulihan.")
         }
     }
 
