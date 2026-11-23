@@ -38,7 +38,7 @@ class ExperimentalPcmRecoveryArtifactLifecycleManager(private val sessionRoot: F
     }
 
     @Synchronized fun cleanup(plan: RecoveryCleanupPlan, confirmed: Boolean): List<String> =
-        ExperimentalRecoverySessionLock.withLock(sessionRoot, "__artifact_cleanup__") {
+        ExperimentalRecoverySessionLock.withRootLock(sessionRoot) {
             cleanupLocked(plan, confirmed)
         }
 
