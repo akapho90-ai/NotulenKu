@@ -52,7 +52,7 @@ class LiveTranscriptionBufferTest {
         assertEquals(3, buffer.size())
         buffer.clear()
         assertEquals(0, buffer.size())
-        assertFalse(buffer.offer(LiveAudioFrame("s", 4, 4, byteArrayOf(4))) && false)
+        assertTrue(buffer.offer(LiveAudioFrame("s", 4, 4, byteArrayOf(4))))
         assertEquals(1, buffer.size())
         buffer.clear()
         assertEquals(0, buffer.size())
