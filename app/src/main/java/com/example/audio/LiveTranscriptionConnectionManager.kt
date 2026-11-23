@@ -3,6 +3,8 @@ package com.example.audio
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withTimeout
 
 /**
@@ -23,6 +25,8 @@ class LiveTranscriptionConnectionManager(
 ) {
     private var connected = false
     private var closed = false
+    // Serializes open/send/close so lifecycle transitions cannot race provider calls.
+    private val lifecycleMutex = Mutex()
 
     init {
         require(sessionId.isNotBlank())
@@ -31,24 +35,24 @@ class LiveTranscriptionConnectionManager(
         require(initialBackoffMs >= 0 && maxBackoffMs >= initialBackoffMs)
     }
 
-    suspend fun connect(): Boolean {
-        if (closed) return false
-        if (connected) return true
-        return connectWithRetries(maxReconnectAttempts)
+    suspend fun connect(): Boolean = lifecycleMutex.withLock {
+        if (closed) return@withLock false
+        if (connected) return@withLock true
+        connectWithRetries(maxReconnectAttempts)
     }
 
     /** Returns true if the frame was delivered without a transport exception. */
-    suspend fun sendFrame(frame: LiveAudioFrame): Boolean {
-        if (closed || frame.sessionId != sessionId) return false
-        if (!connected && !connect()) return false
+    suspend fun sendFrame(frame: LiveAudioFrame): Boolean = lifecycleMutex.withLock {
+        if (closed || frame.sessionId != sessionId) return@withLock false
+        if (!connected && !connectWithRetries(maxReconnectAttempts)) return@withLock false
         try {
             withTimeout(operationTimeoutMs) { provider.sendFrame(frame) }
-            return true
+            true
         } catch (timeout: TimeoutCancellationException) {
             disconnectQuietly()
             onStatus(LiveTranscriptionStatus.DEGRADED, "Pengiriman frame timeout; frame ini tidak dikirim ulang.")
             connectWithRetries(maxReconnectAttempts)
-            return false
+            false
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (failure: Throwable) {
@@ -56,7 +60,7 @@ class LiveTranscriptionConnectionManager(
             onStatus(LiveTranscriptionStatus.DEGRADED, "Koneksi transkripsi terputus; frame ini tidak dikirim ulang.")
             // Recovery is attempted for subsequent frames. This frame is intentionally not retried.
             connectWithRetries(maxReconnectAttempts)
-            return false
+            false
         }
     }
 
@@ -112,8 +116,8 @@ class LiveTranscriptionConnectionManager(
         }
     }
 
-    suspend fun close() {
-        if (closed) return
+    suspend fun close() = lifecycleMutex.withLock {
+        if (closed) return@withLock
         closed = true
         disconnectQuietly()
         onStatus(LiveTranscriptionStatus.STOPPED, null)
