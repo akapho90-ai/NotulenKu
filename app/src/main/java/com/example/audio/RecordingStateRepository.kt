@@ -131,25 +131,15 @@ object RecordingStateRepository {
                 val owner = obj.optString("ownerUserId")
                 if (owner != ownerUserId || sessionId == activeId) return@runCatching null
                 val arr = obj.optJSONArray("segmentPaths") ?: JSONArray()
-                val existingSegments = buildList {
-                    for (i in 0 until arr.length()) {
-                        val p = arr.optString(i)
-                        val segFile = File(p)
-                        if (segFile.exists() && segFile.length() > 256L) {
-                            add(p)
-                        }
-                    }
+                val expectedPaths = List(arr.length()) { arr.optString(it) }
+                if (expectedPaths.isEmpty()) return@runCatching null
+                val totalBytes = expectedPaths.sumOf { path ->
+                    File(path).takeIf { it.isFile }?.length() ?: 0L
                 }
-                if (existingSegments.isEmpty()) {
-                    // Clean empty journal only when no valid audio exists
-                    f.delete()
-                    return@runCatching null
-                }
-                val totalBytes = existingSegments.sumOf { File(it).length() }
                 RecoverableLocalRecording(
                     sessionId = sessionId,
                     ownerUserId = owner,
-                    segmentPaths = existingSegments,
+                    segmentPaths = expectedPaths,
                     elapsedSeconds = obj.optLong("elapsedSeconds", 1L).coerceAtLeast(1L),
                     createdAtMs = obj.optLong("createdAtMs", f.lastModified()),
                     totalSizeBytes = totalBytes
@@ -166,27 +156,34 @@ object RecordingStateRepository {
         context: Context,
         session: RecoverableLocalRecording
     ): Result<RecordedAudioFile> {
-        val segFiles = session.segmentPaths.map { File(it) }.filter { it.exists() && it.length() > 256L }
-        if (segFiles.isEmpty()) {
-            return Result.failure(IllegalStateException("Berkas segmen rekaman tidak ditemukan."))
-        }
         val outDir = File(context.applicationContext.filesDir, "recordings").apply { mkdirs() }
         val outFile = File(outDir, "rec_recovered_${session.sessionId.take(10)}.m4a")
-        val mergeRes = AudioSegmenter.mergeM4aSegments(segFiles, outFile)
-        return mergeRes.map { merged ->
-            val detectedDur = AudioSegmenter.detectDurationSeconds(merged).coerceAtLeast(session.elapsedSeconds)
-            // Safe cleanup of raw segment parts only after merged output is confirmed readable & non-empty
-            if (merged.exists() && merged.length() > 256L) {
-                segFiles.filter { it.absolutePath != merged.absolutePath }.forEach { runCatching { it.delete() } }
-                deleteSessionJournal(context, session.sessionId)
-            }
-            RecordedAudioFile(
-                file = merged,
-                durationSeconds = detectedDur.coerceAtLeast(1L),
-                sizeBytes = merged.length(),
-                mimeType = "audio/mp4"
-            )
+        return finalizeSessionToAudioFile(
+            context, session.sessionId, session.segmentPaths.map { File(it) }, outFile, session.elapsedSeconds
+        )
+    }
+
+    internal fun finalizeSessionToAudioFile(
+        context: Context,
+        sessionId: String,
+        expectedSegments: List<File>,
+        output: File,
+        elapsedSeconds: Long
+    ): Result<RecordedAudioFile> = runCatching {
+        val merged = AudioSegmenter.mergeM4aSegments(expectedSegments, output).getOrThrow()
+        if (!merged.isFile || merged.length() <= 256L) {
+            throw IllegalStateException("Hasil merge rekaman tidak tersedia.")
         }
+        val detectedDuration = AudioSegmenter.detectDurationSeconds(merged).coerceAtLeast(elapsedSeconds)
+        val recording = RecordedAudioFile(
+            file = merged,
+            durationSeconds = detectedDuration.coerceAtLeast(1L),
+            sizeBytes = merged.length(),
+            mimeType = "audio/mp4"
+        )
+        expectedSegments.filter { it.absolutePath != merged.absolutePath }.forEach { runCatching { it.delete() } }
+        deleteSessionJournal(context, sessionId)
+        recording
     }
 
     fun discardRecoverableSession(context: Context, session: RecoverableLocalRecording) {

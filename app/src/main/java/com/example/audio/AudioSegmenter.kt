@@ -152,6 +152,7 @@ object AudioSegmenter {
         knownDurationSec: Long,
         chunkDurationSec: Long = DEFAULT_CHUNK_DURATION_SEC
     ): Result<List<PreparedAudioChunk>> {
+        if (!isSafeSessionId(sessionId)) return Result.failure(IllegalArgumentException("ID sesi tidak aman untuk direktori chunk."))
         if (!sourceFile.exists() || sourceFile.length() <= 0L) {
             return Result.failure(IllegalArgumentException("Berkas audio asli tidak ditemukan atau kosong."))
         }
@@ -173,7 +174,14 @@ object AudioSegmenter {
             )
         }
 
-        val chunkDir = File(context.cacheDir, "transcription_chunks/$sessionId").apply { mkdirs() }
+        val chunkBase = File(context.cacheDir, "transcription_chunks")
+        val chunkDir = File(chunkBase, sessionId)
+        if (!chunkBase.mkdirs() && !chunkBase.isDirectory) return Result.failure(IllegalStateException("Direktori chunk tidak dapat dibuat."))
+        if (!chunkDir.mkdirs() && !chunkDir.isDirectory) return Result.failure(IllegalStateException("Direktori sesi chunk tidak dapat dibuat."))
+        if (chunkDir.listFiles()?.isNotEmpty() == true) return Result.failure(IllegalStateException("Direktori chunk sesi sudah berisi file; hindari penggunaan ulang artefak lama."))
+        val canonicalBase = runCatching { chunkBase.canonicalFile }.getOrElse { return Result.failure(it) }
+        val canonicalChunkDir = runCatching { chunkDir.canonicalFile }.getOrElse { return Result.failure(it) }
+        if (canonicalChunkDir.parentFile != canonicalBase) return Result.failure(IllegalStateException("Path chunk sesi tidak aman."))
         // Adjust chunk duration downward if bitrate is high so each chunk stays safely under 8 MB
         val bytesPerSec = (sourceFile.length().toDouble() / detectedDurationSec.toDouble()).coerceAtLeast(1000.0)
         val sizeSafeChunkSec = ((MAX_DIRECT_UPLOAD_BYTES * 0.75) / bytesPerSec).toLong().coerceIn(60L, chunkDurationSec)
@@ -182,6 +190,7 @@ object AudioSegmenter {
         val chunks = mutableListOf<PreparedAudioChunk>()
         for (window in windows) {
             val outFile = File(chunkDir, "chunk_${"%04d".format(window.index)}.m4a")
+            if (outFile.exists()) return Result.failure(IllegalStateException("File chunk tujuan sudah ada; ekstraksi dibatalkan."))
             val extractRes = extractValidM4aSegment(
                 sourceFile = sourceFile,
                 destFile = outFile,
@@ -191,6 +200,7 @@ object AudioSegmenter {
             if (extractRes.isFailure) {
                 // Clean partial temp chunks only (NEVER touch sourceFile)
                 chunks.filter { it.isTempChunk }.forEach { runCatching { it.file.delete() } }
+                runCatching { chunkDir.deleteRecursively() }
                 return Result.failure(
                     extractRes.exceptionOrNull()
                         ?: IllegalStateException("Gagal memecah audio panjang menjadi segmen valid.")
@@ -210,6 +220,11 @@ object AudioSegmenter {
             }
         }
 
+        if (chunks.size != windows.size) {
+            chunks.filter { it.isTempChunk }.forEach { runCatching { it.file.delete() } }
+            runCatching { chunkDir.deleteRecursively() }
+            return Result.failure(IllegalStateException("Jumlah chunk hasil tidak cocok dengan rencana pemotongan."))
+        }
         if (chunks.isEmpty()) {
             return Result.failure(IllegalStateException("Tidak ada segmen audio valid yang dapat diproses."))
         }
@@ -279,12 +294,14 @@ object AudioSegmenter {
             Result.success(destFile)
         } catch (e: Exception) {
             Log.e(TAG, "Failed extracting valid audio segment", e)
-            runCatching { muxer?.release() }
-            runCatching { extractor.release() }
             runCatching { if (destFile.exists()) destFile.delete() }
             Result.failure(
                 IllegalStateException("Gagal memecah audio panjang secara aman: ${e.localizedMessage ?: "format tidak didukung"}")
             )
+        } finally {
+            // Ensure resources are released even for early Result.failure returns (e.g. unsupported track).
+            runCatching { muxer?.release() }
+            runCatching { extractor.release() }
         }
     }
 
@@ -293,55 +310,83 @@ object AudioSegmenter {
      * into one valid .m4a file using MediaExtractor + MediaMuxer.
      */
     fun mergeM4aSegments(segmentFiles: List<File>, outputFile: File): Result<File> {
-        val validFiles = segmentFiles.filter { it.exists() && it.length() > 256L }
-        if (validFiles.isEmpty()) {
-            return Result.failure(IllegalStateException("Tidak ada segmen rekaman yang valid untuk digabungkan."))
+        if (segmentFiles.isEmpty()) return Result.failure(IllegalStateException("Tidak ada segmen rekaman untuk digabungkan."))
+        // Check the complete list before opening media containers or changing the output.
+        val candidates = segmentFiles
+        val missing = candidates.firstOrNull { !it.isFile || it.length() <= 256L }
+        if (missing != null) {
+            return Result.failure(IllegalStateException("Segmen audio tidak valid atau hilang: ${missing.name}"))
         }
-        if (validFiles.size == 1) {
-            return runCatching {
-                val single = validFiles.first()
-                if (single.absolutePath != outputFile.absolutePath) {
-                    single.copyTo(outputFile, overwrite = true)
+        val unreadable = candidates.firstOrNull { !isReadableAudioFile(it) }
+        if (unreadable != null) {
+            return Result.failure(IllegalStateException("Segmen audio tidak dapat dibaca: ${unreadable.name}"))
+        }
+
+        var chosenFormat: MediaFormat? = null
+        var maxBufSize = 256 * 1024
+        for (candidate in candidates) {
+            val probe = MediaExtractor()
+            try {
+                probe.setDataSource(candidate.absolutePath)
+                val trackIndex = findAudioTrackIndex(probe)
+                if (trackIndex < 0) throw IllegalStateException("Segmen tidak memiliki trek audio: ${candidate.name}")
+                val format = probe.getTrackFormat(trackIndex)
+                if (chosenFormat == null) {
+                    chosenFormat = format
+                    maxBufSize = runCatching { format.getInteger(MediaFormat.KEY_MAX_INPUT_SIZE) }
+                        .getOrDefault(256 * 1024).coerceIn(64 * 1024, 1024 * 1024)
+                } else if (format.getString(MediaFormat.KEY_MIME) != chosenFormat!!.getString(MediaFormat.KEY_MIME) ||
+                    runCatching { format.getInteger(MediaFormat.KEY_SAMPLE_RATE) != chosenFormat!!.getInteger(MediaFormat.KEY_SAMPLE_RATE) }.getOrDefault(true) ||
+                    runCatching { format.getInteger(MediaFormat.KEY_CHANNEL_COUNT) != chosenFormat!!.getInteger(MediaFormat.KEY_CHANNEL_COUNT) }.getOrDefault(true)
+                ) {
+                    throw IllegalStateException("Format segmen tidak kompatibel: ${candidate.name}")
                 }
-                outputFile
+            } catch (e: Exception) {
+                return Result.failure(e)
+            } finally {
+                runCatching { probe.release() }
             }
         }
 
-        var muxer: MediaMuxer? = null
-        val tempMerged = File(outputFile.parentFile, "${outputFile.name}.merging")
-        return try {
-            val firstExtractor = MediaExtractor()
-            firstExtractor.setDataSource(validFiles.first().absolutePath)
-            val firstTrack = findAudioTrackIndex(firstExtractor)
-            if (firstTrack < 0) {
-                firstExtractor.release()
-                return Result.failure(IllegalStateException("Segmen rekaman pertama tidak memiliki trek audio valid."))
+        if (candidates.size == 1) {
+            val single = candidates.first()
+            if (single.absolutePath == outputFile.absolutePath) return Result.success(single)
+            val staged = File(outputFile.parentFile, "${outputFile.name}.staged")
+            return try {
+                staged.delete()
+                single.copyTo(staged, overwrite = true)
+                if (!isReadableAudioFile(staged)) throw IllegalStateException("Salinan audio tidak lolos validasi.")
+                promoteValidatedAudio(staged, outputFile, ::isReadableAudioFile)
+                Result.success(outputFile)
+            } catch (e: Exception) {
+                runCatching { staged.delete() }
+                Result.failure(e)
             }
-            val trackFormat = firstExtractor.getTrackFormat(firstTrack)
-            val maxBufSize = runCatching { trackFormat.getInteger(MediaFormat.KEY_MAX_INPUT_SIZE) }
-                .getOrDefault(256 * 1024)
-                .coerceIn(64 * 1024, 1024 * 1024)
-            firstExtractor.release()
+        }
 
-            if (tempMerged.exists()) tempMerged.delete()
+        val format = chosenFormat ?: return Result.failure(IllegalStateException("Format audio tidak tersedia."))
+        val tempMerged = File(outputFile.parentFile, "${outputFile.name}.merging")
+        var muxer: MediaMuxer? = null
+        return try {
+            tempMerged.delete()
             muxer = MediaMuxer(tempMerged.absolutePath, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
-            val muxTrackIdx = muxer.addTrack(trackFormat)
+            val muxTrackIdx = muxer.addTrack(format)
             muxer.start()
-
             val buffer = ByteBuffer.allocate(maxBufSize)
             val info = MediaCodec.BufferInfo()
             var globalPtsOffsetUs = 0L
+            var totalSamplesWritten = 0L
 
-            for (segFile in validFiles) {
+            for (segFile in candidates) {
                 val extractor = MediaExtractor()
                 try {
                     extractor.setDataSource(segFile.absolutePath)
                     val trackIdx = findAudioTrackIndex(extractor)
-                    if (trackIdx < 0) continue
+                    if (trackIdx < 0) throw IllegalStateException("Trek audio hilang pada ${segFile.name}")
                     extractor.selectTrack(trackIdx)
-
                     var segBasePtsUs = -1L
                     var lastSegPtsUs = 0L
+                    var segmentSamples = 0L
                     while (true) {
                         info.offset = 0
                         info.size = extractor.readSampleData(buffer, 0)
@@ -353,35 +398,87 @@ object AudioSegmenter {
                         info.flags = extractor.sampleFlags
                         muxer.writeSampleData(muxTrackIdx, buffer, info)
                         lastSegPtsUs = relUs
+                        segmentSamples++
                         extractor.advance()
                     }
-                    // Add ~64ms AAC frame spacing between segments to keep timestamps strictly monotonic
+                    if (segmentSamples == 0L) throw IllegalStateException("Segmen kosong saat dibaca: ${segFile.name}")
+                    totalSamplesWritten += segmentSamples
                     globalPtsOffsetUs += lastSegPtsUs + 64_000L
-                } catch (segErr: Exception) {
-                    Log.w(TAG, "Skipping unreadable segment ${segFile.name} during merge: ${segErr.message}")
                 } finally {
-                    runCatching { extractor.release() }
+                    extractor.release()
                 }
             }
 
             muxer.stop()
             muxer.release()
             muxer = null
-
-            if (!tempMerged.exists() || tempMerged.length() <= 256L) {
-                return Result.failure(IllegalStateException("Hasil penggabungan audio kosong."))
-            }
-            if (outputFile.exists()) outputFile.delete()
-            if (!tempMerged.renameTo(outputFile)) {
-                tempMerged.copyTo(outputFile, overwrite = true)
-                tempMerged.delete()
-            }
+            if (totalSamplesWritten == 0L || !isReadableAudioFile(tempMerged)) throw IllegalStateException("Hasil merge tidak lolos validasi audio.")
+            promoteValidatedAudio(tempMerged, outputFile, ::isReadableAudioFile)
             Result.success(outputFile)
         } catch (e: Exception) {
-            Log.e(TAG, "Failed merging recording segments", e)
+            Log.e(TAG, "Merge failed; source segments preserved", e)
             runCatching { muxer?.release() }
-            runCatching { if (tempMerged.exists()) tempMerged.delete() }
+            runCatching { tempMerged.delete() }
             Result.failure(e)
+        }
+    }
+
+    /** Same-directory promotion. A backup survives until a playable destination is verified. */
+    internal fun promoteValidatedAudio(
+        staged: File,
+        destination: File,
+        isReadable: (File) -> Boolean,
+        move: (File, File) -> Boolean = File::renameTo
+    ) {
+        if (!isReadable(staged)) throw IllegalStateException("File staged tidak valid.")
+        val backup = File(destination.parentFile, "${destination.name}.backup")
+        val replacingValidDestination = destination.isFile && isReadable(destination)
+
+        if (replacingValidDestination) {
+            // The current destination is still safe while a stale backup is cleared.
+            if (backup.exists() && (!backup.isFile || !backup.delete())) {
+                throw IllegalStateException("Tidak dapat membersihkan backup audio.")
+            }
+            if (!move(destination, backup)) throw IllegalStateException("Tidak dapat menyimpan backup audio.")
+        } else if (destination.exists() && (!destination.isFile || !destination.delete())) {
+            throw IllegalStateException("Tidak dapat mengosongkan tujuan.")
+        }
+
+        // When retrying with no valid destination, any existing backup stays in place.
+        var promoted = false
+        try {
+            promoted = move(staged, destination)
+            if (!promoted) throw IllegalStateException("Tidak dapat mempromosikan audio hasil merge.")
+            if (!isReadable(destination)) throw IllegalStateException("File promoted gagal validasi.")
+        } catch (failure: Exception) {
+            if (promoted) runCatching { destination.delete() }
+            if (replacingValidDestination && !destination.exists()) {
+                runCatching { move(backup, destination) }
+            }
+            throw failure
+        }
+        if (backup.isFile) runCatching { backup.delete() }
+    }
+
+    /**
+     * Validates a file by opening its container and confirming a readable audio track
+     * with at least one sample. This is intentionally stricter than checking file size.
+     */
+    fun isReadableAudioFile(file: File): Boolean {
+        if (!file.exists() || file.length() <= 256L) return false
+        val extractor = MediaExtractor()
+        return try {
+            extractor.setDataSource(file.absolutePath)
+            val trackIndex = findAudioTrackIndex(extractor)
+            if (trackIndex < 0) return false
+            extractor.selectTrack(trackIndex)
+            val buffer = ByteBuffer.allocate(64 * 1024)
+            extractor.readSampleData(buffer, 0) > 0
+        } catch (e: Exception) {
+            Log.w(TAG, "Audio validation failed for ${file.name}: ${e.message}")
+            false
+        } finally {
+            runCatching { extractor.release() }
         }
     }
 
@@ -399,12 +496,16 @@ object AudioSegmenter {
     }
 
     fun cleanupTempChunkDir(context: Context, sessionId: String) {
-        if (sessionId.isBlank()) return
-        val dir = File(context.cacheDir, "transcription_chunks/$sessionId")
-        if (dir.exists()) {
-            runCatching { dir.deleteRecursively() }
-        }
+        if (!isSafeSessionId(sessionId)) return
+        val base = File(context.cacheDir, "transcription_chunks")
+        val dir = File(base, sessionId)
+        val baseCanonical = runCatching { base.canonicalFile }.getOrNull() ?: return
+        val dirCanonical = runCatching { dir.canonicalFile }.getOrNull() ?: return
+        if (dirCanonical.parentFile == baseCanonical && dir.isDirectory) runCatching { dir.deleteRecursively() }
     }
+
+    private fun isSafeSessionId(sessionId: String): Boolean =
+        sessionId.matches(Regex("[A-Za-z0-9_-]{1,128}"))
 
     private fun findAudioTrackIndex(extractor: MediaExtractor): Int {
         for (i in 0 until extractor.trackCount) {
