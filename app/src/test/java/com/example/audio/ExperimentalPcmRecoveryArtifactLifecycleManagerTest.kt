@@ -6,7 +6,7 @@ import java.io.File
 
 class ExperimentalPcmRecoveryArtifactLifecycleManagerTest {
     @Test fun inventoryRecognizesRecoveryArtifactsAndUnknownIsNotEligible() {
-        val root=createTempDir()
+        val root=kotlin.io.path.createTempDirectory().toFile()
         try {
             val dir=File(root,"recovered");assertTrue(dir.mkdirs())
             File(dir,"s1.recovered.pcm").writeBytes(byteArrayOf(1,2))
@@ -19,7 +19,7 @@ class ExperimentalPcmRecoveryArtifactLifecycleManagerTest {
         } finally { root.deleteRecursively() }
     }
     @Test fun cleanupRequiresConfirmationAndPreservesUnselectedFiles() {
-        val root=createTempDir()
+        val root=kotlin.io.path.createTempDirectory().toFile()
         try {
             val dir=File(root,"recovered");dir.mkdirs()
             val pcm=File(dir,"s1.recovered.pcm");pcm.writeBytes(byteArrayOf(1,2,3))
@@ -35,7 +35,7 @@ class ExperimentalPcmRecoveryArtifactLifecycleManagerTest {
         } finally { root.deleteRecursively() }
     }
     @Test fun refusesCleanupIfArtifactChangedAfterPlan() {
-        val root=createTempDir()
+        val root=kotlin.io.path.createTempDirectory().toFile()
         try {
             val dir=File(root,"recovered");dir.mkdirs()
             val file=File(dir,"s1.recovered.pcm");file.writeBytes(byteArrayOf(1,2))
@@ -47,7 +47,7 @@ class ExperimentalPcmRecoveryArtifactLifecycleManagerTest {
         } finally { root.deleteRecursively() }
     }
     @Test fun unknownAndUnmatchedNamesCannotBePlannedForCleanup() {
-        val root=createTempDir()
+        val root=kotlin.io.path.createTempDirectory().toFile()
         try {
             val dir=File(root,"recovered");dir.mkdirs()
             val unknown=File(dir,"unknown.dat");unknown.writeText("x")
