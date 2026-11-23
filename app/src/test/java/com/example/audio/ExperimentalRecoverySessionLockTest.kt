@@ -9,7 +9,7 @@ import java.util.concurrent.TimeUnit
 
 class ExperimentalRecoverySessionLockTest {
     @Test fun sessionLockWaitsForRootMutationLock() {
-        val root = createTempDir()
+        val root = kotlin.io.path.createTempDirectory().toFile()
         val rootHeld = CountDownLatch(1)
         val releaseRoot = CountDownLatch(1)
         val sessionEntered = CountDownLatch(1)
