@@ -1,6 +1,7 @@
 package com.example.audio
 
 import java.io.File
+import java.io.IOException
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -9,6 +10,20 @@ class ExperimentalPcmSessionJournalTest {
     private fun checkpoint(dir: File, file: File, id: String, bytes: Long) {
         File(dir, file.name + ".checkpoint").writeText("session=$id\nformat=pcm16_mono\nsample_rate=16000\nbytes=$bytes\n")
     }
+    @Test fun journalRejectsUnsafeFileNameAndSessionId() {
+        val dir=kotlin.io.path.createTempDirectory("pcm-journal-test").toFile()
+        try {
+            val journal=ExperimentalPcmSessionJournal(dir)
+            var pathRejected=false
+            try { journal.write(ExperimentalPcmSessionMetadata("safe","../escape.pcm",16000,status=ExperimentalPcmSessionStatus.RECOVERABLE,checkpointBytes=0,updatedAtEpochMs=1)) } catch (_: IOException) { pathRejected=true }
+            assertTrue(pathRejected)
+            var idRejected=false
+            try { journal.write(ExperimentalPcmSessionMetadata("../bad","../bad.pcm",16000,status=ExperimentalPcmSessionStatus.RECOVERABLE,checkpointBytes=0,updatedAtEpochMs=1)) } catch (_: IOException) { idRejected=true }
+            assertTrue(idRejected)
+            assertTrue(dir.listFiles()?.isEmpty() == true)
+        } finally { dir.deleteRecursively() }
+    }
+
     @Test fun validCheckpointGetsIntegrityHashAndOrphanIsRejected() {
         val dir=kotlin.io.path.createTempDirectory("pcm-journal-test").toFile()
         try {
