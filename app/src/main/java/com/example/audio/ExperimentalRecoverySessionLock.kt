@@ -7,9 +7,18 @@ import java.util.concurrent.ConcurrentHashMap
 internal object ExperimentalRecoverySessionLock {
     private val locks = ConcurrentHashMap<String, Any>()
 
-    fun <T> withLock(root: File, sessionId: String, action: () -> T): T {
-        val key = root.canonicalPath + "|" + sessionId
-        val lock = locks.computeIfAbsent(key) { Any() }
-        synchronized(lock) { return action() }
+    private fun lockFor(key: String) = locks.computeIfAbsent(key) { Any() }
+
+    /** Serializes recovery-directory mutations across sessions within this JVM. */
+    fun <T> withRootLock(root: File, action: () -> T): T {
+        val key = root.canonicalPath + "|__recovery_root__"
+        synchronized(lockFor(key)) { return action() }
     }
+
+    /** Root lock first, then a session-specific lock, with a consistent lock order. */
+    fun <T> withLock(root: File, sessionId: String, action: () -> T): T =
+        withRootLock(root) {
+            val key = root.canonicalPath + "|" + sessionId
+            synchronized(lockFor(key)) { action() }
+        }
 }
