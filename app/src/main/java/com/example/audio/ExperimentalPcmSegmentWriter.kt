@@ -16,7 +16,7 @@ class ExperimentalPcmSegmentWriter(
     private val sampleRateHz: Int = 16_000,
     private val flushIntervalBytes: Int = sampleRateHz * 2
 ) : AutoCloseable {
-    private val safeSessionId = sessionId.replace(Regex("[^A-Za-z0-9_-]"), "_")
+    private val safeSessionId = validateSessionId(sessionId)
     private val file = File(directory, "$safeSessionId.pcm")
     private val checkpoint = File(directory, "$safeSessionId.pcm.checkpoint")
     private var rawStream: FileOutputStream? = null
@@ -27,7 +27,6 @@ class ExperimentalPcmSegmentWriter(
     private val journal = ExperimentalPcmSessionJournal(directory)
 
     init {
-        require(sessionId.isNotBlank())
         require(sampleRateHz > 0)
         require(flushIntervalBytes > 0)
     }
@@ -164,6 +163,11 @@ class ExperimentalPcmSegmentWriter(
         sessionId = sessionId, fileName = file.name, sampleRateHz = sampleRateHz,
         status = status, checkpointBytes = bytesWritten, updatedAtEpochMs = System.currentTimeMillis()
     )
+
+    private fun validateSessionId(value: String): String {
+        require(value.matches(Regex("[A-Za-z0-9_-]{1,128}"))) { "ID sesi PCM tidak valid." }
+        return value
+    }
 
     val currentFile: File get() = file
     val totalBytes: Long get() = bytesWritten
