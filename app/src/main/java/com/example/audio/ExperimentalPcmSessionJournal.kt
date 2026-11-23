@@ -105,18 +105,6 @@ class ExperimentalPcmSessionJournal(private val directory: File) {
             metadata.checkpointBytes >= 0 && metadata.checkpointBytes % 2L == 0L &&
             metadata.updatedAtEpochMs >= 0
 
-    private fun archiveInvalid(target: File): Boolean {
-        if (!target.isFile) return false
-        val archiveName = target.name + ".invalid"
-        var archive = File(directory, archiveName)
-        var suffix = 1
-        while (archive.exists()) {
-            archive = File(directory, "$archiveName.$suffix")
-            suffix++
-        }
-        return target.renameTo(archive)
-    }
-
     /**
      * A valid primary wins. Otherwise prefer the last committed version in the
      * backup over the prepared temp file. Both moves stay in the same directory.
@@ -129,13 +117,26 @@ class ExperimentalPcmSessionJournal(private val directory: File) {
         val candidate = if (backupMetadata != null) backup else temp
         val metadata = backupMetadata ?: readRecord(temp) ?: return
 
-        if (target.exists() && !archiveInvalid(target)) return
+        if (target.exists() && !archiveInvalidPcmRecord(target)) return
         // If promotion fails or the process stops after archiving, the candidate
         // is still available for the next recovery attempt.
         if (!candidate.renameTo(target) || readRecord(target) != metadata) return
 
         if (backup.isFile) backup.delete()
         if (temp.isFile) temp.delete()
+    }
+
+    internal fun recoverForSession(sessionId: String): ExperimentalPcmSessionMetadata? {
+        require(sessionIdPattern.matches(sessionId))
+        val target = File(directory, "$sessionId.pcm.journal")
+        recoverPromotion(target)
+        val record = readRecord(target)
+        if (record != null) return record
+        val sidecars = listOf(target, File(directory, target.name + ".bak"), File(directory, target.name + ".tmp"))
+        if (sidecars.any(File::exists)) {
+            throw IOException("Journal PCM tidak dapat digunakan untuk memverifikasi checkpoint.")
+        }
+        return null
     }
 
     fun list(): List<ExperimentalPcmSessionMetadata> {
@@ -159,6 +160,18 @@ class ExperimentalPcmSessionJournal(private val directory: File) {
         return directory.listFiles { f -> f.isFile && f.name.endsWith(".pcm.journal") }
             ?.mapNotNull(::read)?.sortedByDescending { it.updatedAtEpochMs } ?: emptyList()
     }
+}
+
+internal fun archiveInvalidPcmRecord(target: File): Boolean {
+    if (!target.isFile) return false
+    val archiveName = target.name + ".invalid"
+    var archive = File(target.parentFile, archiveName)
+    var suffix = 1
+    while (archive.exists()) {
+        archive = File(target.parentFile, "$archiveName.$suffix")
+        suffix++
+    }
+    return target.renameTo(archive)
 }
 
 data class ExperimentalPcmRecoveryAssessment(
@@ -188,18 +201,18 @@ class ExperimentalPcmIntegrityVerifier(private val directory: File) {
         if (!fileExists) issues += "File PCM tidak ditemukan."
         val aligned=fileExists && pcmFile.length()%2L==0L
         if (fileExists && !aligned) issues += "Ukuran file tidak sejajar PCM16."
-        val checkpointFile=File(directory,pcmFile.name+".checkpoint")
-        val checkpointValues=if(checkpointFile.isFile) checkpointFile.readLines().mapNotNull { line ->
-            val i=line.indexOf('=')
-            if(i<=0) null else line.substring(0,i) to line.substring(i+1)
-        }.toMap() else emptyMap()
-        val checkpointValid=checkpointFile.isFile &&
-            checkpointValues["session"]==metadata.sessionId &&
-            checkpointValues["format"]==metadata.format &&
-            checkpointValues["sample_rate"]==metadata.sampleRateHz.toString() &&
-            checkpointValues["bytes"]?.toLongOrNull()?.let { it>=0 && it<=pcmFile.length() && it%2L==0L }==true
-        if(!checkpointValid) issues += "Checkpoint sidecar hilang atau tidak valid."
-        val checkpointBytes=checkpointValues["bytes"]?.toLongOrNull()
+        val checkpointFile = File(directory, pcmFile.name + ".checkpoint")
+        val checkpointBytes = if (fileExists) {
+            try {
+                readPcmCheckpointBytes(
+                    checkpointFile, metadata.sessionId, pcmFile.name, metadata.sampleRateHz, pcmFile.length()
+                )
+            } catch (_: IOException) {
+                null
+            }
+        } else null
+        val checkpointValid = checkpointBytes != null
+        if (!checkpointValid) issues += "Checkpoint sidecar hilang atau tidak valid."
         val matches=checkpointValid && checkpointBytes==metadata.checkpointBytes
         if(!matches) issues += "Ukuran checkpoint tidak cocok dengan journal."
         val trusted=if(matches && metadata.checkpointBytes<=pcmFile.length()) metadata.checkpointBytes else null

@@ -19,6 +19,8 @@ class ExperimentalPcmSegmentWriter(
     private val safeSessionId = validateSessionId(sessionId)
     private val file = File(directory, "$safeSessionId.pcm")
     private val checkpoint = File(directory, "$safeSessionId.pcm.checkpoint")
+    private val checkpointBackup = File(directory, checkpoint.name + ".bak")
+    private val checkpointTemp = File(directory, checkpoint.name + ".tmp")
     private var rawStream: FileOutputStream? = null
     private var stream: BufferedOutputStream? = null
     private var bytesWritten = 0L
@@ -39,66 +41,64 @@ class ExperimentalPcmSegmentWriter(
         reconcileExistingFile()
         rawStream = FileOutputStream(file, true)
         stream = BufferedOutputStream(rawStream!!)
-        bytesWritten = file.length()
         try {
             writeCheckpoint(force = true)
-            journal.write(metadata(ExperimentalPcmSessionStatus.RECORDING))
         } catch (e: Exception) {
-            failWriter(e)
+            failWriter(fallbackCheckpointBytes = bytesWritten)
             throw e
         }
         return file
     }
 
-    private fun recoverCheckpointSidecar(actualPcmBytes: Long) {
-        if (checkpoint.exists()) return
-        val journalMetadata = journal.read(File(directory, "$safeSessionId.pcm.journal")) ?: return
-        if (journalMetadata.sessionId != safeSessionId || journalMetadata.fileName != file.name ||
-            journalMetadata.sampleRateHz != sampleRateHz || journalMetadata.format != "pcm16_mono") return
-        val candidates = listOf(File(directory, checkpoint.name + ".bak"), File(directory, checkpoint.name + ".tmp"))
-        val candidate = candidates.firstOrNull { sidecar ->
-            if (!sidecar.isFile) false else runCatching {
-                val values = sidecar.readLines().mapNotNull { line ->
-                    val idx=line.indexOf('=')
-                    if(idx<=0) null else line.substring(0,idx) to line.substring(idx+1)
-                }.toMap()
-                val bytes=values["bytes"]?.toLongOrNull()
-                values["session"]==safeSessionId && values["format"]=="pcm16_mono" &&
-                    values["sample_rate"]==sampleRateHz.toString() && bytes!=null &&
-                    bytes>=0 && bytes%2L==0L && bytes<=actualPcmBytes && bytes==journalMetadata.checkpointBytes
-            }.getOrDefault(false)
-        } ?: return
-        if (checkpoint.exists()) return
-        if (candidate.renameTo(checkpoint)) {
-            candidates.filter { it != candidate && it.exists() }.forEach { runCatching { it.delete() } }
+    private fun recoverCheckpoint(actualPcmBytes: Long): Long {
+        val primaryBytes = checkpointBytes(checkpoint, actualPcmBytes)
+        val record = journal.recoverForSession(safeSessionId)
+        if (record == null) {
+            // Older sessions may only have a primary checkpoint. Sidecars still require a journal.
+            return primaryBytes ?: throw IOException("Checkpoint PCM tidak valid dan journal tidak tersedia.")
         }
+        if (record.fileName != file.name || record.sampleRateHz != sampleRateHz || record.format != "pcm16_mono") {
+            throw IOException("Journal PCM tidak cocok dengan file atau format sesi.")
+        }
+
+        val trustedBytes = record.checkpointBytes
+        if (primaryBytes == trustedBytes) return trustedBytes
+        val candidate = listOf(checkpointBackup, checkpointTemp).firstOrNull {
+            checkpointBytes(it, actualPcmBytes) == trustedBytes
+        } ?: throw IOException("Tidak ada checkpoint PCM yang cocok dengan journal dan ukuran file.")
+
+        if (checkpoint.exists() && !archiveInvalidPcmRecord(checkpoint)) {
+            throw IOException("Tidak dapat mengarsipkan checkpoint PCM lama.")
+        }
+        if (!candidate.renameTo(checkpoint) || checkpointBytes(checkpoint, actualPcmBytes) != trustedBytes) {
+            throw IOException("Tidak dapat memulihkan checkpoint PCM.")
+        }
+        if (checkpointBackup.isFile) checkpointBackup.delete()
+        if (checkpointTemp.isFile) checkpointTemp.delete()
+        return trustedBytes
     }
 
+    private fun checkpointBytes(candidate: File, actualPcmBytes: Long): Long? =
+        readPcmCheckpointBytes(candidate, safeSessionId, file.name, sampleRateHz, actualPcmBytes)
+
     private fun reconcileExistingFile() {
-        if (!file.exists()) { bytesWritten = 0L; return }
+        if (!file.exists()) {
+            if (checkpoint.exists() || checkpointBackup.exists() || checkpointTemp.exists() ||
+                journal.recoverForSession(safeSessionId) != null
+            ) {
+                throw IOException("File PCM untuk sesi yang sudah tercatat tidak ditemukan.")
+            }
+            bytesWritten = 0L
+            return
+        }
+        if (!file.isFile) throw IOException("Path PCM bukan file.")
         val actual = file.length()
-        recoverCheckpointSidecar(actual)
-        if (!checkpoint.exists()) {
-            throw IOException("File PCM lama ditemukan tanpa checkpoint; append ditolak untuk mencegah reuse data yang tidak terverifikasi.")
-        }
-        var trustedBytes = actual
-        if (checkpoint.exists()) {
-            val values = checkpoint.readLines().mapNotNull { line ->
-                val idx = line.indexOf('=')
-                if (idx <= 0) null else line.substring(0, idx) to line.substring(idx + 1)
-            }.toMap()
-            if (values["session"] != safeSessionId ||
-                values["format"] != "pcm16_mono" ||
-                values["sample_rate"] != sampleRateHz.toString()
-            ) throw IOException("Checkpoint PCM tidak cocok dengan sesi atau format.")
-            val recorded = values["bytes"]?.toLongOrNull()
-                ?: throw IOException("Checkpoint PCM tidak valid.")
-            if (recorded < 0L || recorded > actual) throw IOException("Checkpoint PCM melebihi ukuran file.")
-            trustedBytes = recorded
-        }
-        trustedBytes -= trustedBytes % 2L
+        val trustedBytes = recoverCheckpoint(actual)
         if (trustedBytes != actual) {
-            RandomAccessFile(file, "rw").use { it.setLength(trustedBytes); it.fd.sync() }
+            RandomAccessFile(file, "rw").use {
+                it.setLength(trustedBytes)
+                it.fd.sync()
+            }
         }
         bytesWritten = trustedBytes
     }
@@ -115,7 +115,7 @@ class ExperimentalPcmSegmentWriter(
             bytesSinceFlush += pcm.size
             if (bytesSinceFlush >= flushIntervalBytes) writeCheckpoint(force = false)
         } catch (e: Exception) {
-            failWriter(e)
+            failWriter()
             throw e
         }
     }
@@ -124,48 +124,56 @@ class ExperimentalPcmSegmentWriter(
         stream?.flush()
         rawStream?.fd?.sync()
         if (force || bytesSinceFlush >= flushIntervalBytes) {
-            val text = "session=$safeSessionId\nformat=pcm16_mono\nsample_rate=$sampleRateHz\nbytes=$bytesWritten\n"
-            atomicReplace(checkpoint, text)
-            bytesSinceFlush = 0
+            val text = listOf(
+                "session=$safeSessionId", "file=${file.name}", "format=pcm16_mono",
+                "sample_rate=$sampleRateHz", "bytes=$bytesWritten"
+            ).joinToString("\n", postfix = "\n")
+            replaceCheckpoint(text)
             journal.write(metadata(ExperimentalPcmSessionStatus.RECORDING))
+            bytesSinceFlush = 0
+            // The previous checkpoint is still needed until the new journal is committed.
+            if (checkpointBackup.isFile) checkpointBackup.delete()
         }
     }
 
-    private fun atomicReplace(target: File, text: String) {
-        val temp = File(directory, target.name + ".tmp")
-        val backup = File(directory, target.name + ".bak")
-        try {
-            FileOutputStream(temp).use { out ->
-                out.write(text.toByteArray(Charsets.UTF_8))
-                out.flush()
-                out.fd.sync()
+    private fun replaceCheckpoint(text: String) {
+        FileOutputStream(checkpointTemp).use { out ->
+            out.write(text.toByteArray(Charsets.UTF_8))
+            out.flush()
+            out.fd.sync()
+        }
+        if (checkpointTemp.readText(Charsets.UTF_8) != text) {
+            throw IOException("Verifikasi checkpoint sementara gagal.")
+        }
+        if (checkpointBackup.exists() && (!checkpointBackup.isFile || !checkpointBackup.delete())) {
+            throw IOException("Tidak dapat membersihkan backup checkpoint PCM.")
+        }
+        if (checkpoint.exists() && !checkpoint.renameTo(checkpointBackup)) {
+            throw IOException("Tidak dapat menyimpan backup checkpoint PCM.")
+        }
+        if (!checkpointTemp.renameTo(checkpoint)) {
+            if (checkpointBackup.isFile && !checkpoint.exists()) checkpointBackup.renameTo(checkpoint)
+            throw IOException("Tidak dapat mempromosikan checkpoint PCM.")
+        }
+        if (checkpoint.readText(Charsets.UTF_8) != text) {
+            if (checkpointBackup.isFile && archiveInvalidPcmRecord(checkpoint)) {
+                checkpointBackup.renameTo(checkpoint)
             }
-            // Retain the previous valid file until the new candidate is verified.
-            if (backup.exists() && !backup.delete()) throw IOException("Tidak dapat membersihkan backup metadata.")
-            if (target.exists() && !target.renameTo(backup)) throw IOException("Tidak dapat menyimpan backup metadata.")
-            if (!temp.renameTo(target)) {
-                if (backup.exists()) backup.renameTo(target)
-                throw IOException("Tidak dapat mempromosikan metadata baru.")
-            }
-            if (target.readText(Charsets.UTF_8) != text) {
-                target.delete()
-                if (backup.exists()) backup.renameTo(target)
-                throw IOException("Verifikasi metadata hasil penggantian gagal.")
-            }
-            if (backup.exists() && !backup.delete()) backup.deleteOnExit()
-        } finally {
-            if (temp.exists()) temp.delete()
+            throw IOException("Verifikasi checkpoint hasil penggantian gagal.")
         }
     }
 
-    private fun failWriter(cause: Throwable) {
+    private fun failWriter(fallbackCheckpointBytes: Long = 0L) {
         failed = true
         runCatching { stream?.flush() }
         runCatching { rawStream?.fd?.sync() }
         runCatching { stream?.close() }
         stream = null
         rawStream = null
-        runCatching { journal.write(metadata(ExperimentalPcmSessionStatus.FAILED)) }
+        runCatching {
+            val trustedBytes = journal.recoverForSession(safeSessionId)?.checkpointBytes ?: fallbackCheckpointBytes
+            journal.write(metadata(ExperimentalPcmSessionStatus.FAILED).copy(checkpointBytes = trustedBytes))
+        }
     }
 
     @Synchronized
@@ -178,7 +186,7 @@ class ExperimentalPcmSegmentWriter(
             writeCheckpoint(force = true)
             journal.write(metadata(ExperimentalPcmSessionStatus.RECOVERABLE))
         } catch (e: Exception) {
-            failWriter(e)
+            failWriter()
             throw e
         } finally {
             runCatching { out.close() }
@@ -199,4 +207,31 @@ class ExperimentalPcmSegmentWriter(
 
     val currentFile: File get() = file
     val totalBytes: Long get() = bytesWritten
+}
+
+/** Returns null for malformed or mismatched metadata. I/O errors leave recovery blocked. */
+internal fun readPcmCheckpointBytes(
+    checkpoint: File,
+    sessionId: String,
+    pcmFileName: String,
+    sampleRateHz: Int,
+    actualPcmBytes: Long
+): Long? {
+    if (!checkpoint.isFile || pcmFileName != "$sessionId.pcm") return null
+    val values = mutableMapOf<String, String>()
+    checkpoint.useLines(Charsets.UTF_8) { lines ->
+        for (line in lines) {
+            if (line.isBlank()) continue
+            val separator = line.indexOf('=')
+            if (separator <= 0) return null
+            if (values.put(line.substring(0, separator), line.substring(separator + 1)) != null) return null
+        }
+    }
+    val recordedFileName = values["file"]
+    if (values["session"] != sessionId || values["format"] != "pcm16_mono" ||
+        values["sample_rate"] != sampleRateHz.toString() ||
+        (recordedFileName != null && recordedFileName != pcmFileName)
+    ) return null
+    val bytes = values["bytes"]?.toLongOrNull() ?: return null
+    return bytes.takeIf { it >= 0 && it <= actualPcmBytes && it % 2L == 0L }
 }
