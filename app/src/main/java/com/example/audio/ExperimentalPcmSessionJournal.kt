@@ -63,14 +63,16 @@ class ExperimentalPcmSessionJournal(private val directory: File) {
             val i=line.indexOf('=')
             if (i<=0) null else line.substring(0,i) to line.substring(i+1)
         }.toMap()
-        ExperimentalPcmSessionMetadata(
-            sessionId=values["session"] ?: return null, fileName=values["file"] ?: return null,
-            sampleRateHz=values["sample_rate"]?.toIntOrNull() ?: return null,
-            format=values["format"] ?: return null,
-            status=ExperimentalPcmSessionStatus.valueOf(values["status"] ?: return null),
-            checkpointBytes=values["checkpoint_bytes"]?.toLongOrNull() ?: return null,
-            updatedAtEpochMs=values["updated_at"]?.toLongOrNull() ?: return null
-        )
+        val id=values["session"] ?: return null
+        val filename=values["file"] ?: return null
+        val rate=values["sample_rate"]?.toIntOrNull() ?: return null
+        val format=values["format"] ?: return null
+        val status=ExperimentalPcmSessionStatus.valueOf(values["status"] ?: return null)
+        val bytes=values["checkpoint_bytes"]?.toLongOrNull() ?: return null
+        val updated=values["updated_at"]?.toLongOrNull() ?: return null
+        if (!id.matches(Regex("[A-Za-z0-9_-]{1,128}")) || filename != "$id.pcm" ||
+            rate<=0 || format!="pcm16_mono" || bytes<0 || bytes%2L!=0L || updated<0) return null
+        ExperimentalPcmSessionMetadata(id,filename,rate,format,status,bytes,updated)
     }.getOrNull()
 
     fun list(): List<ExperimentalPcmSessionMetadata> =
