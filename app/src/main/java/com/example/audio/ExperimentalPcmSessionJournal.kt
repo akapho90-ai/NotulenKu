@@ -75,9 +75,39 @@ class ExperimentalPcmSessionJournal(private val directory: File) {
         ExperimentalPcmSessionMetadata(id,filename,rate,format,status,bytes,updated)
     }.getOrNull()
 
-    fun list(): List<ExperimentalPcmSessionMetadata> =
+    /**
+     * Recover interrupted journal promotion conservatively. A valid primary wins.
+     * If primary is absent/invalid, only fully parseable sidecars are candidates;
+     * backup is preferred over temp because temp may represent an uncommitted write.
+     */
+    private fun recoverPromotion(target: File) {
+        if (read(target) != null) return
+        val backup = File(directory, target.name + ".bak")
+        val temp = File(directory, target.name + ".tmp")
+        val candidate = listOf(backup, temp).firstOrNull { it.isFile && read(it) != null } ?: return
+        if (target.exists()) {
+            val invalid = File(directory, target.name + ".invalid")
+            if (invalid.exists() || !target.renameTo(invalid)) return
+        }
+        if (!candidate.renameTo(target)) {
+            val invalid = File(directory, target.name + ".invalid")
+            if (invalid.exists()) runCatching { invalid.delete() }
+            if (invalid.exists()) return
+            if (target.exists()) runCatching { target.delete() }
+            candidate.renameTo(target)
+        }
+        if (read(target) != null) {
+            if (backup.exists() && backup != target) runCatching { backup.delete() }
+            if (temp.exists() && temp != target) runCatching { temp.delete() }
+        }
+    }
+
+    fun list(): List<ExperimentalPcmSessionMetadata> {
         directory.listFiles { f -> f.isFile && f.name.endsWith(".pcm.journal") }
+            ?.forEach(::recoverPromotion)
+        return directory.listFiles { f -> f.isFile && f.name.endsWith(".pcm.journal") }
             ?.mapNotNull(::read)?.sortedByDescending { it.updatedAtEpochMs } ?: emptyList()
+    }
 }
 
 data class ExperimentalPcmRecoveryAssessment(
