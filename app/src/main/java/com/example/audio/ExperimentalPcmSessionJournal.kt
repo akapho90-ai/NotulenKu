@@ -17,11 +17,18 @@ data class ExperimentalPcmSessionMetadata(
 )
 
 class ExperimentalPcmSessionJournal(private val directory: File) {
-    private fun safe(id: String) = id.replace(Regex("[^A-Za-z0-9_-]"), "_")
+    private fun safe(id: String): String {
+        if (!id.matches(Regex("[A-Za-z0-9_-]{1,128}"))) throw IOException("ID sesi journal tidak valid.")
+        return id
+    }
     private fun journalFile(id: String) = File(directory, "${safe(id)}.pcm.journal")
 
     @Synchronized
     fun write(metadata: ExperimentalPcmSessionMetadata) {
+        safe(metadata.sessionId)
+        if (metadata.fileName != "${metadata.sessionId}.pcm" || metadata.fileName.contains("/") || metadata.fileName.contains("\\\\") || metadata.sampleRateHz <= 0 || metadata.checkpointBytes < 0 || metadata.checkpointBytes % 2L != 0L) {
+            throw IOException("Metadata journal PCM tidak valid.")
+        }
         if (!directory.exists() && !directory.mkdirs()) throw IOException("Tidak dapat membuat direktori journal PCM.")
         val file = journalFile(metadata.sessionId)
         val temp = File(directory, file.name + ".tmp")
@@ -104,7 +111,7 @@ class ExperimentalPcmIntegrityVerifier(private val directory: File) {
             if(i<=0) null else line.substring(0,i) to line.substring(i+1)
         }.toMap() else emptyMap()
         val checkpointValid=checkpointFile.isFile &&
-            checkpointValues["session"]==metadata.sessionId.replace(Regex("[^A-Za-z0-9_-]"),"_") &&
+            checkpointValues["session"]==metadata.sessionId &&
             checkpointValues["format"]==metadata.format &&
             checkpointValues["sample_rate"]==metadata.sampleRateHz.toString() &&
             checkpointValues["bytes"]?.toLongOrNull()?.let { it>=0 && it<=pcmFile.length() && it%2L==0L }==true
