@@ -6,7 +6,7 @@ Scope: experimental PCM persistence foundation only. No APK build, production in
 ## Changes
 - PCM writer now retains a backup of the existing checkpoint during promotion, writes the candidate using FileOutputStream, flushes and syncs the file descriptor, verifies promoted contents, and restores the prior file if promotion/verification fails.
 - Journal writes use the same backup-and-restore promotion pattern, flush and sync the candidate, and verify content before removing the backup.
-- PCM append/checkpoint operations fail closed: a caught persistence exception transitions the writer to FAILED, closes the stream best-effort, attempts to mark the journal FAILED, and blocks subsequent append calls.
+- PCM append/checkpoint operations fail closed: a caught persistence exception transitions the writer to FAILED, closes the stream best-effort, attempts to mark the journal FAILED, and blocks subsequent append calls.\n- Existing PCM files without checkpoints are rejected on reopen rather than treated as trusted data.\n- Odd-length PCM16 frames are rejected inside the append failure-handling boundary and transition the writer to FAILED.
 - PCM reopen reconciliation truncation syncs the file descriptor after setLength.
 
 ## Files
