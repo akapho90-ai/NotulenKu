@@ -2,11 +2,31 @@ package com.example.audio
 
 import java.io.File
 import java.io.IOException
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
+import org.junit.Rule
 import org.junit.Test
+import org.junit.rules.TemporaryFolder
 
 class ExperimentalPcmSessionJournalTest {
+
+    @get:Rule
+    val recoveryFolder = TemporaryFolder()
+
+    private fun journalText(session: String = "recover", bytes: Int = 4) = """
+        session=$session
+        file=$session.pcm
+        sample_rate=16000
+        format=pcm16_mono
+        status=RECOVERABLE
+        checkpoint_bytes=$bytes
+        updated_at=10
+    """.trimIndent()
+
+    private fun recoveryFile(suffix: String = "") = File(recoveryFolder.root, "recover.pcm.journal$suffix")
+
     private fun checkpoint(dir: File, file: File, id: String, bytes: Long) {
         File(dir, file.name + ".checkpoint").writeText("session=$id\nformat=pcm16_mono\nsample_rate=16000\nbytes=$bytes\n")
     }
@@ -69,6 +89,135 @@ updated_at=11
             assertTrue(target.isFile)
             assertFalse(temp.exists())
         } finally { dir.deleteRecursively() }
+    }
+
+    @Test fun validPrimaryWinsOverBackupAndTemp() {
+        val primary = recoveryFile().apply { writeText(journalText()) }
+        val backup = recoveryFile(".bak").apply { writeText(journalText(bytes = 2)) }
+        val temp = recoveryFile(".tmp").apply { writeText(journalText(bytes = 6)) }
+
+        val journal = ExperimentalPcmSessionJournal(recoveryFolder.root)
+        assertEquals(listOf(4L), journal.list().map { it.checkpointBytes })
+        assertEquals(journalText(), primary.readText())
+        assertEquals(journalText(bytes = 2), backup.readText())
+        assertEquals(journalText(bytes = 6), temp.readText())
+    }
+
+    @Test fun invalidPrimaryIsArchivedWithoutReplacingOlderArchiveAndBackupWins() {
+        val primary = recoveryFile().apply { writeText("new damaged journal") }
+        val backup = recoveryFile(".bak").apply { writeText(journalText()) }
+        val temp = recoveryFile(".tmp").apply { writeText(journalText(bytes = 6)) }
+        val olderArchive = recoveryFile(".invalid").apply { writeText("older damaged journal") }
+
+        val journal = ExperimentalPcmSessionJournal(recoveryFolder.root)
+        val restored = journal.list()
+        assertEquals(listOf(4L), restored.map { it.checkpointBytes })
+        assertEquals(journalText(), primary.readText())
+        assertEquals("older damaged journal", olderArchive.readText())
+        assertEquals("new damaged journal", recoveryFile(".invalid.1").readText())
+        assertFalse(backup.exists())
+        assertFalse(temp.exists())
+        assertEquals(restored, ExperimentalPcmSessionJournal(recoveryFolder.root).list())
+    }
+
+    @Test fun tempIsRecoveredWhenBackupIsIncompleteAfterPrimaryWasArchived() {
+        val backup = recoveryFile(".bak").apply { writeText(journalText().substringBefore("updated_at=")) }
+        val temp = recoveryFile(".tmp").apply { writeText(journalText(bytes = 6)) }
+        val archive = recoveryFile(".invalid").apply { writeText("previously archived journal") }
+
+        val journal = ExperimentalPcmSessionJournal(recoveryFolder.root)
+        assertEquals(listOf(6L), journal.list().map { it.checkpointBytes })
+        assertEquals(journalText(bytes = 6), recoveryFile().readText())
+        assertEquals("previously archived journal", archive.readText())
+        assertFalse(backup.exists())
+        assertFalse(temp.exists())
+    }
+
+    @Test fun partialAndAmbiguousCandidatesAreLeftInPlace() {
+        val primary = recoveryFile().apply { writeText("damaged primary") }
+        val partial = "session=recover\nfile=recover.pcm"
+        val ambiguous = journalText() + "\ncheckpoint_bytes=6"
+        val backup = recoveryFile(".bak").apply { writeText(partial) }
+        val temp = recoveryFile(".tmp").apply { writeText(ambiguous) }
+
+        val journal = ExperimentalPcmSessionJournal(recoveryFolder.root)
+        assertTrue(journal.list().isEmpty())
+        assertEquals("damaged primary", primary.readText())
+        assertEquals(partial, backup.readText())
+        assertEquals(ambiguous, temp.readText())
+        assertFalse(recoveryFile(".invalid").exists())
+    }
+
+    @Test fun journalNeverReturnsOrPromotesRecordsForAnotherSession() {
+        val otherSession = journalText(session = "other")
+        val primary = recoveryFile().apply { writeText(otherSession) }
+        val backup = recoveryFile(".bak").apply { writeText(otherSession) }
+        val temp = recoveryFile(".tmp").apply { writeText(otherSession) }
+
+        val journal = ExperimentalPcmSessionJournal(recoveryFolder.root)
+        assertTrue(journal.list().isEmpty())
+        assertEquals(otherSession, primary.readText())
+        assertEquals(otherSession, backup.readText())
+        assertEquals(otherSession, temp.readText())
+    }
+
+    @Test fun blockedPromotionKeepsBothCandidatesForRetry() {
+        val primary = recoveryFile()
+        assertTrue(primary.mkdir())
+        val backup = recoveryFile(".bak").apply { writeText(journalText()) }
+        val temp = recoveryFile(".tmp").apply { writeText(journalText(bytes = 6)) }
+
+        val journal = ExperimentalPcmSessionJournal(recoveryFolder.root)
+        assertTrue(journal.list().isEmpty())
+        assertTrue(primary.isDirectory)
+        assertEquals(journalText(), backup.readText())
+        assertEquals(journalText(bytes = 6), temp.readText())
+
+        assertTrue(primary.delete())
+        assertEquals(listOf(4L), journal.list().map { it.checkpointBytes })
+        assertEquals(journalText(), primary.readText())
+        assertFalse(backup.exists())
+        assertFalse(temp.exists())
+    }
+
+    @Test fun writeKeepsRecoveredBackupWhenNewTempCannotBeWritten() {
+        val backup = recoveryFile(".bak").apply { writeText(journalText()) }
+        val temp = recoveryFile(".tmp")
+        assertTrue(temp.mkdir())
+
+        val journal = ExperimentalPcmSessionJournal(recoveryFolder.root)
+        val update = ExperimentalPcmSessionMetadata(
+            "recover", "recover.pcm", 16000,
+            status = ExperimentalPcmSessionStatus.RECOVERABLE, checkpointBytes = 6, updatedAtEpochMs = 11
+        )
+        assertThrows(IOException::class.java) { journal.write(update) }
+        assertEquals(journalText(), recoveryFile().readText())
+        assertFalse(backup.exists())
+        assertTrue(temp.isDirectory)
+
+        assertTrue(temp.delete())
+        journal.write(update)
+        assertEquals(listOf(update), journal.list())
+        assertFalse(backup.exists())
+        assertFalse(temp.exists())
+    }
+
+    @Test fun writeDoesNotOverwriteTheOnlyValidTempWhenPromotionIsBlocked() {
+        val primary = recoveryFile()
+        assertTrue(primary.mkdir())
+        val temp = recoveryFile(".tmp").apply { writeText(journalText()) }
+
+        val journal = ExperimentalPcmSessionJournal(recoveryFolder.root)
+        val update = ExperimentalPcmSessionMetadata(
+            "recover", "recover.pcm", 16000,
+            status = ExperimentalPcmSessionStatus.RECOVERABLE, checkpointBytes = 6, updatedAtEpochMs = 11
+        )
+        assertThrows(IOException::class.java) { journal.write(update) }
+        assertEquals(journalText(), temp.readText())
+
+        assertTrue(primary.delete())
+        assertEquals(listOf(4L), journal.list().map { it.checkpointBytes })
+        assertFalse(temp.exists())
     }
 
     @Test fun validCheckpointGetsIntegrityHashAndOrphanIsRejected() {

@@ -1,8 +1,8 @@
 package com.example.audio
 
 import java.io.File
-import java.io.IOException
 import java.io.FileOutputStream
+import java.io.IOException
 
 enum class ExperimentalPcmSessionStatus { RECORDING, RECOVERABLE, FINALIZED, FAILED }
 
@@ -17,89 +17,125 @@ data class ExperimentalPcmSessionMetadata(
 )
 
 class ExperimentalPcmSessionJournal(private val directory: File) {
-    private fun safe(id: String): String {
-        if (!id.matches(Regex("[A-Za-z0-9_-]{1,128}"))) throw IOException("ID sesi journal tidak valid.")
-        return id
-    }
-    private fun journalFile(id: String) = File(directory, "${safe(id)}.pcm.journal")
+    private val sessionIdPattern = Regex("[A-Za-z0-9_-]{1,128}")
 
     @Synchronized
     fun write(metadata: ExperimentalPcmSessionMetadata) {
-        safe(metadata.sessionId)
-        if (metadata.fileName != "${metadata.sessionId}.pcm" || metadata.fileName.contains("/") || metadata.fileName.contains("\\\\") || metadata.sampleRateHz <= 0 || metadata.format != "pcm16_mono" || metadata.checkpointBytes < 0 || metadata.checkpointBytes % 2L != 0L) {
-            throw IOException("Metadata journal PCM tidak valid.")
-        }
+        if (!isValid(metadata)) throw IOException("Metadata journal PCM tidak valid.")
         if (!directory.exists() && !directory.mkdirs()) throw IOException("Tidak dapat membuat direktori journal PCM.")
-        val file = journalFile(metadata.sessionId)
+
+        val file = File(directory, "${metadata.fileName}.journal")
+        val backup = File(directory, file.name + ".bak")
         val temp = File(directory, file.name + ".tmp")
+
+        recoverPromotion(file)
+        val previous = readRecord(file)
+        if (previous == null && (readRecord(backup) != null || readRecord(temp) != null)) {
+            throw IOException("Tidak dapat memulihkan journal PCM sebelum penulisan.")
+        }
+
         val content = listOf(
             "session=${metadata.sessionId}", "file=${metadata.fileName}",
             "sample_rate=${metadata.sampleRateHz}", "format=${metadata.format}",
             "status=${metadata.status.name}", "checkpoint_bytes=${metadata.checkpointBytes}",
             "updated_at=${metadata.updatedAtEpochMs}"
-        ).joinToString("\n", postfix="\n")
+        ).joinToString("\n", postfix = "\n")
         FileOutputStream(temp).use { out ->
             out.write(content.toByteArray(Charsets.UTF_8))
             out.flush()
             out.fd.sync()
         }
-        val backup = File(directory, file.name + ".bak")
-        if (backup.exists() && !backup.delete()) { temp.delete(); throw IOException("Tidak dapat membersihkan backup journal.") }
-        if (file.exists() && !file.renameTo(backup)) { temp.delete(); throw IOException("Tidak dapat menyimpan backup journal.") }
+        if (readRecord(temp) != metadata) throw IOException("Verifikasi journal sementara gagal.")
+
+        if (previous != null) {
+            if (backup.exists() && (!backup.isFile || !backup.delete())) {
+                throw IOException("Tidak dapat membersihkan backup journal.")
+            }
+            if (!file.renameTo(backup)) throw IOException("Tidak dapat menyimpan backup journal.")
+        } else if (file.exists() && !archiveInvalid(file)) {
+            throw IOException("Tidak dapat mengarsipkan journal PCM yang tidak valid.")
+        }
+
         if (!temp.renameTo(file)) {
-            if (backup.exists()) backup.renameTo(file)
+            if (previous != null && !file.exists()) backup.renameTo(file)
             throw IOException("Tidak dapat mempromosikan journal PCM.")
         }
-        if (file.readText(Charsets.UTF_8) != content) {
-            file.delete()
-            if (backup.exists()) backup.renameTo(file)
+        if (readRecord(file) != metadata) {
+            if (previous != null) recoverPromotion(file)
             throw IOException("Verifikasi journal hasil penggantian gagal.")
         }
-        if (backup.exists() && !backup.delete()) backup.deleteOnExit()
+        if (backup.isFile) backup.delete()
     }
 
-    fun read(file: File): ExperimentalPcmSessionMetadata? = runCatching {
-        val values = file.readLines().mapNotNull { line ->
-            val i=line.indexOf('=')
-            if (i<=0) null else line.substring(0,i) to line.substring(i+1)
-        }.toMap()
-        val id=values["session"] ?: return null
-        val filename=values["file"] ?: return null
-        val rate=values["sample_rate"]?.toIntOrNull() ?: return null
-        val format=values["format"] ?: return null
-        val status=ExperimentalPcmSessionStatus.valueOf(values["status"] ?: return null)
-        val bytes=values["checkpoint_bytes"]?.toLongOrNull() ?: return null
-        val updated=values["updated_at"]?.toLongOrNull() ?: return null
-        if (!id.matches(Regex("[A-Za-z0-9_-]{1,128}")) || filename != "$id.pcm" ||
-            rate<=0 || format!="pcm16_mono" || bytes<0 || bytes%2L!=0L || updated<0) return null
-        ExperimentalPcmSessionMetadata(id,filename,rate,format,status,bytes,updated)
-    }.getOrNull()
+    fun read(file: File): ExperimentalPcmSessionMetadata? = runCatching { readRecord(file) }.getOrNull()
+
+    // A malformed record can be replaced. An I/O error must leave the files alone.
+    private fun readRecord(file: File): ExperimentalPcmSessionMetadata? {
+        if (!file.isFile) return null
+        val values = mutableMapOf<String, String>()
+        file.useLines(Charsets.UTF_8) { lines ->
+            for (line in lines) {
+                if (line.isBlank()) continue
+                val separator = line.indexOf('=')
+                if (separator <= 0) return null
+                val key = line.substring(0, separator)
+                if (values.put(key, line.substring(separator + 1)) != null) return null
+            }
+        }
+        val metadata = ExperimentalPcmSessionMetadata(
+            sessionId = values["session"] ?: return null,
+            fileName = values["file"] ?: return null,
+            sampleRateHz = values["sample_rate"]?.toIntOrNull() ?: return null,
+            format = values["format"] ?: return null,
+            status = ExperimentalPcmSessionStatus.entries.firstOrNull { it.name == values["status"] }
+                ?: return null,
+            checkpointBytes = values["checkpoint_bytes"]?.toLongOrNull() ?: return null,
+            updatedAtEpochMs = values["updated_at"]?.toLongOrNull() ?: return null
+        )
+        val primaryName = "${metadata.fileName}.journal"
+        val matchesJournal = file.name == primaryName ||
+            file.name == "$primaryName.bak" || file.name == "$primaryName.tmp"
+        return metadata.takeIf { matchesJournal && isValid(it) }
+    }
+
+    private fun isValid(metadata: ExperimentalPcmSessionMetadata): Boolean =
+        sessionIdPattern.matches(metadata.sessionId) &&
+            metadata.fileName == "${metadata.sessionId}.pcm" &&
+            metadata.sampleRateHz > 0 && metadata.format == "pcm16_mono" &&
+            metadata.checkpointBytes >= 0 && metadata.checkpointBytes % 2L == 0L &&
+            metadata.updatedAtEpochMs >= 0
+
+    private fun archiveInvalid(target: File): Boolean {
+        if (!target.isFile) return false
+        val archiveName = target.name + ".invalid"
+        var archive = File(directory, archiveName)
+        var suffix = 1
+        while (archive.exists()) {
+            archive = File(directory, "$archiveName.$suffix")
+            suffix++
+        }
+        return target.renameTo(archive)
+    }
 
     /**
-     * Recover interrupted journal promotion conservatively. A valid primary wins.
-     * If primary is absent/invalid, only fully parseable sidecars are candidates;
-     * backup is preferred over temp because temp may represent an uncommitted write.
+     * A valid primary wins. Otherwise prefer the last committed version in the
+     * backup over the prepared temp file. Both moves stay in the same directory.
      */
     private fun recoverPromotion(target: File) {
-        if (read(target) != null) return
+        if (readRecord(target) != null) return
         val backup = File(directory, target.name + ".bak")
         val temp = File(directory, target.name + ".tmp")
-        val candidate = listOf(backup, temp).firstOrNull { it.isFile && read(it) != null } ?: return
-        if (target.exists()) {
-            val invalid = File(directory, target.name + ".invalid")
-            if (invalid.exists() || !target.renameTo(invalid)) return
-        }
-        if (!candidate.renameTo(target)) {
-            val invalid = File(directory, target.name + ".invalid")
-            if (invalid.exists()) runCatching { invalid.delete() }
-            if (invalid.exists()) return
-            if (target.exists()) runCatching { target.delete() }
-            candidate.renameTo(target)
-        }
-        if (read(target) != null) {
-            if (backup.exists() && backup != target) runCatching { backup.delete() }
-            if (temp.exists() && temp != target) runCatching { temp.delete() }
-        }
+        val backupMetadata = readRecord(backup)
+        val candidate = if (backupMetadata != null) backup else temp
+        val metadata = backupMetadata ?: readRecord(temp) ?: return
+
+        if (target.exists() && !archiveInvalid(target)) return
+        // If promotion fails or the process stops after archiving, the candidate
+        // is still available for the next recovery attempt.
+        if (!candidate.renameTo(target) || readRecord(target) != metadata) return
+
+        if (backup.isFile) backup.delete()
+        if (temp.isFile) temp.delete()
     }
 
     fun list(): List<ExperimentalPcmSessionMetadata> {
@@ -113,7 +149,13 @@ class ExperimentalPcmSessionJournal(private val directory: File) {
                 else -> f
             }
         }?.distinctBy { it.name } ?: emptyList()
-        targets.forEach(::recoverPromotion)
+        for (target in targets) {
+            try {
+                recoverPromotion(target)
+            } catch (_: IOException) {
+                // Leave unreadable records for a later attempt and continue listing other sessions.
+            }
+        }
         return directory.listFiles { f -> f.isFile && f.name.endsWith(".pcm.journal") }
             ?.mapNotNull(::read)?.sortedByDescending { it.updatedAtEpochMs } ?: emptyList()
     }
