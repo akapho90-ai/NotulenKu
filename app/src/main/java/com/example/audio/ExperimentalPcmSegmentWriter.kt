@@ -50,9 +50,34 @@ class ExperimentalPcmSegmentWriter(
         return file
     }
 
+    private fun recoverCheckpointSidecar(actualPcmBytes: Long) {
+        if (checkpoint.exists()) return
+        val journalMetadata = journal.read(File(directory, "$safeSessionId.pcm.journal")) ?: return
+        if (journalMetadata.sessionId != safeSessionId || journalMetadata.fileName != file.name ||
+            journalMetadata.sampleRateHz != sampleRateHz || journalMetadata.format != "pcm16_mono") return
+        val candidates = listOf(File(directory, checkpoint.name + ".bak"), File(directory, checkpoint.name + ".tmp"))
+        val candidate = candidates.firstOrNull { sidecar ->
+            if (!sidecar.isFile) false else runCatching {
+                val values = sidecar.readLines().mapNotNull { line ->
+                    val idx=line.indexOf('=')
+                    if(idx<=0) null else line.substring(0,idx) to line.substring(idx+1)
+                }.toMap()
+                val bytes=values["bytes"]?.toLongOrNull()
+                values["session"]==safeSessionId && values["format"]=="pcm16_mono" &&
+                    values["sample_rate"]==sampleRateHz.toString() && bytes!=null &&
+                    bytes>=0 && bytes%2L==0L && bytes<=actualPcmBytes && bytes==journalMetadata.checkpointBytes
+            }.getOrDefault(false)
+        } ?: return
+        if (checkpoint.exists()) return
+        if (candidate.renameTo(checkpoint)) {
+            candidates.filter { it != candidate && it.exists() }.forEach { runCatching { it.delete() } }
+        }
+    }
+
     private fun reconcileExistingFile() {
         if (!file.exists()) { bytesWritten = 0L; return }
         val actual = file.length()
+        recoverCheckpointSidecar(actual)
         if (!checkpoint.exists()) {
             throw IOException("File PCM lama ditemukan tanpa checkpoint; append ditolak untuk mencegah reuse data yang tidak terverifikasi.")
         }
