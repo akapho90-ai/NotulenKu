@@ -139,15 +139,31 @@ class LocalProcessingCheckpointStore(private val baseDir: File) {
         }.getOrDefault(false)
     }
 
-    fun loadJob(ownerUserId: String, meetingId: String): LocalProcessingJob? {
-        if (ownerUserId.isBlank() || meetingId.isBlank()) return null
-        val file = jobFile(ownerUserId, meetingId)
-        if (!file.exists()) return null
-        return runCatching {
+    private fun readValidated(file: File, ownerUserId: String, meetingId: String): LocalProcessingJob? =
+        runCatching {
             deserializeJob(JSONObject(file.readText())).takeIf {
                 it.ownerUserId == ownerUserId && it.meetingId == meetingId
             }
         }.getOrNull()
+
+    fun loadJob(ownerUserId: String, meetingId: String): LocalProcessingJob? {
+        if (ownerUserId.isBlank() || meetingId.isBlank()) return null
+        val file = jobFile(ownerUserId, meetingId)
+        val backup = File(file.parentFile, "${file.name}.bak")
+        val primary = if (file.exists()) readValidated(file, ownerUserId, meetingId) else null
+        if (primary != null) return primary
+
+        // Recover the previous durable checkpoint only if the primary is absent or invalid.
+        val recovered = if (backup.exists()) readValidated(backup, ownerUserId, meetingId) else null
+        if (recovered != null) {
+            runCatching {
+                if (file.exists()) file.delete()
+                backup.copyTo(file, overwrite = true)
+                backup.delete()
+            }.onFailure { Log.e(TAG, "Failed restoring checkpoint backup", it) }
+            return recovered
+        }
+        return null
     }
 
     fun listJobs(ownerUserId: String): List<LocalProcessingJob> {
