@@ -284,7 +284,7 @@ class MeetingViewModel(
                 ukuranBytes = sizeBytes,
                 preferredLanguage = preferredLanguage
             )
-            persistJob(initialJob)
+            if (!persistJob(initialJob)) return@launch
             executeResumableJob(
                 job = initialJob,
                 tenant = tenant,
@@ -354,7 +354,7 @@ class MeetingViewModel(
                     mergedSegments = meeting.segments,
                     mergedTranscriptText = meeting.transcriptText
                 )
-                persistJob(job)
+                if (!persistJob(job)) return@launch
                 executeResumableJob(job, tenant, taskConfigs, prices)
             } else if (file != null && file.exists()) {
                 val job = LocalProcessingJob(
@@ -382,6 +382,8 @@ class MeetingViewModel(
     ) {
         var currentJob = job
         activeJob = currentJob
+        // Processing is unsafe without a durable checkpoint. Fail closed before AI/backend work.
+        if (!persistJob(currentJob)) return
 
         // Stage 4 shortcut: if summary is already done, ONLY retry saving to Supabase without re-running AI!
         if (currentJob.summaryDone) {
@@ -398,7 +400,7 @@ class MeetingViewModel(
             val originalFile = File(currentJob.originalAudioPath)
             if (!originalFile.exists() || originalFile.length() <= 0L) {
                 currentJob = currentJob.copy(lastError = "Berkas audio asli tidak ditemukan di perangkat.")
-                persistJob(currentJob)
+                if (!persistJob(currentJob)) return
                 _processingState.value = ProcessingStepState(
                     meetingId = currentJob.meetingId,
                     stepIndex = 2,
@@ -431,7 +433,7 @@ class MeetingViewModel(
                     prepRes.getOrElse { err ->
                         val msg = toFriendlyIndonesianError(err)
                         currentJob = currentJob.copy(lastError = msg)
-                        persistJob(currentJob)
+                        if (!persistJob(currentJob)) return
                         _processingState.value = ProcessingStepState(
                             meetingId = currentJob.meetingId,
                             stepIndex = 1,
@@ -475,7 +477,7 @@ class MeetingViewModel(
                     }
                 }
                 currentJob = currentJob.copy(chunks = mergedChunks, lastError = null)
-                persistJob(currentJob)
+                if (!persistJob(currentJob)) return
             }
 
             val sttConfig = taskConfigs.firstOrNull { it.task == "audio_transcription" }
@@ -512,7 +514,7 @@ class MeetingViewModel(
                     val errMsg = "Bagian audio ${i + 1}/$totalChunks tidak dapat dibaca. Rekaman asli tetap aman."
                     updatedChunks[i] = chunk.copy(status = ChunkStatus.FAILED, errorMessage = errMsg)
                     currentJob = currentJob.copy(chunks = updatedChunks, lastError = errMsg)
-                    persistJob(currentJob)
+                    if (!persistJob(currentJob)) return
                     _processingState.value = ProcessingStepState(
                         meetingId = currentJob.meetingId,
                         stepIndex = 2,
@@ -542,7 +544,7 @@ class MeetingViewModel(
                     }
                     updatedChunks[i] = chunk.copy(status = ChunkStatus.FAILED, errorMessage = errMsg)
                     currentJob = currentJob.copy(chunks = updatedChunks, lastError = fullErr)
-                    persistJob(currentJob)
+                    if (!persistJob(currentJob)) return
                     _processingState.value = ProcessingStepState(
                         meetingId = currentJob.meetingId,
                         stepIndex = 2,
@@ -578,14 +580,14 @@ class MeetingViewModel(
                     errorMessage = null
                 )
                 currentJob = currentJob.copy(chunks = updatedChunks, lastError = null)
-                persistJob(currentJob)
+                if (!persistJob(currentJob)) return
             }
 
             // Strictly verify ALL chunks succeeded before marking transcription done
             if (updatedChunks.any { it.status != ChunkStatus.DONE }) {
                 val msg = "Sebagian segmen transkripsi belum selesai. Ketuk Proses Ulang untuk melanjutkan."
                 currentJob = currentJob.copy(lastError = msg)
-                persistJob(currentJob)
+                if (!persistJob(currentJob)) return
                 _processingState.value = ProcessingStepState(
                     meetingId = currentJob.meetingId,
                     stepIndex = 2,
@@ -603,7 +605,7 @@ class MeetingViewModel(
             if (mergedSegments.isEmpty()) {
                 val msg = "Transkrip kosong — tidak ada ucapan yang terdeteksi atau model tidak mengembalikan teks."
                 currentJob = currentJob.copy(lastError = msg)
-                persistJob(currentJob)
+                if (!persistJob(currentJob)) return
                 _processingState.value = ProcessingStepState(
                     meetingId = currentJob.meetingId,
                     stepIndex = 2,
@@ -626,7 +628,7 @@ class MeetingViewModel(
                 mergedTranscriptText = fullText,
                 lastError = null
             )
-            persistJob(currentJob)
+            if (!persistJob(currentJob)) return
         }
 
         // Stage 3: Generate Summary & Action Items (reuses completed transcript on retry!)
@@ -642,7 +644,7 @@ class MeetingViewModel(
         val summary = sumResult.getOrElse { err ->
             val errMsg = "Transkrip selesai, tetapi penyusunan notulen gagal: ${toFriendlyIndonesianError(err)}"
             currentJob = currentJob.copy(lastError = errMsg)
-            persistJob(currentJob)
+            if (!persistJob(currentJob)) return
             _processingState.value = ProcessingStepState(
                 meetingId = currentJob.meetingId,
                 stepIndex = 3,
@@ -683,7 +685,7 @@ class MeetingViewModel(
             modelInfo = modelInfo,
             lastError = null
         )
-        persistJob(currentJob)
+        if (!persistJob(currentJob)) return
 
         pendingSave = PendingSaveContext(
             payload = currentJob.toSavePayload(),
