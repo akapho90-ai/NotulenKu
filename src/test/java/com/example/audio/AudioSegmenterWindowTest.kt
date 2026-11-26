@@ -15,7 +15,7 @@ class AudioSegmenterWindowTest {
   windows.zipWithNext().forEach { (a,b) -> assertTrue(b.startSec < a.endSec); assertEquals(2L,a.endSec-b.startSec) }
  }
  @Test fun unicodeOverlapPrefixIsTrimmed() {
-  assertEquals("lanjut agenda", AudioSegmenter.trimOverlappingPrefix("Bahas agenda selanjutnya", "agenda selanjutnya lanjut agenda"))
+  assertEquals("lanjut agenda", AudioSegmenter.trimOverlappingPrefix("bahas agenda selanjutnya rapat", "agenda selanjutnya rapat lanjut agenda"))
  }
  @Test fun repeatedBoundaryPhraseIsRecognizedAcrossUnicodeWords() {
   val prev = com.example.data.model.TranscriptSegment(pembicara = "Pembicara 1", mulaiDetik = 1L, selesaiDetik = 4L, teks = "bahas jadwal rapat besok")
