@@ -1311,11 +1311,11 @@ class MeetingViewModel(
         val saved = store?.saveJob(job) ?: false
         refreshPendingLocalJobs()
         if (!saved) {
-            val message = "Checkpoint lokal gagal disimpan. Proses dihentikan agar kemajuan tidak hilang; rekaman asli tetap dipertahankan."
+            val message = "Checkpoint lokal gagal disimpan; kemajuan proses mungkin tidak tersimpan. Rekaman asli tetap dipertahankan."
             _uiMessage.value = message
             val current = _processingState.value
             if (current?.meetingId == job.meetingId) {
-                _processingState.value = current.copy(error = message, stageDetail = "Penyimpanan checkpoint gagal", canRetryProcessing = true)
+                _processingState.value = current.copy(error = message, stageDetail = "Checkpoint gagal disimpan", canRetryProcessing = true)
             }
         }
         return saved
