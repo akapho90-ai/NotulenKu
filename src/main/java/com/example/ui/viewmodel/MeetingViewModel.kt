@@ -29,7 +29,11 @@ import com.example.data.repository.PersonalMeetingSavePayload
 import com.example.data.repository.TenantRepository
 import com.google.firebase.Timestamp
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -85,7 +89,8 @@ class MeetingViewModel(
     autoLoadOnInit: Boolean = true,
     private val ownerDisplayNameProvider: () -> String = { "Pengguna" },
     private val appContext: Context? = null,
-    private val checkpointStore: LocalProcessingCheckpointStore? = appContext?.let { LocalProcessingCheckpointStore(it) }
+    private val checkpointStore: LocalProcessingCheckpointStore? = appContext?.let { LocalProcessingCheckpointStore(it) },
+    private val processingIoDispatcher: CoroutineDispatcher = Dispatchers.IO
 ) : ViewModel() {
 
     private val _activeTenant = MutableStateFlow<Tenant?>(null)
@@ -97,6 +102,8 @@ class MeetingViewModel(
 
     private val _processingState = MutableStateFlow<ProcessingStepState?>(null)
     val processingState: StateFlow<ProcessingStepState?> = _processingState.asStateFlow()
+    private val _processingBusy = MutableStateFlow(false)
+    val processingBusy = _processingBusy.asStateFlow()
 
     private val _pendingLocalJobs = MutableStateFlow<List<LocalProcessingJob>>(emptyList())
     val pendingLocalJobs: StateFlow<List<LocalProcessingJob>> = _pendingLocalJobs.asStateFlow()
@@ -125,6 +132,7 @@ class MeetingViewModel(
     val periodicSummaryState: StateFlow<UiState<PeriodicSummaryResult>?> = _periodicSummaryState.asStateFlow()
 
     private var pendingSave: PendingSaveContext? = null
+    private var processingTask: Job? = null
     private var activeJob: LocalProcessingJob? = null
     private var activeDetailMeetingId: String? = null
 
@@ -170,7 +178,10 @@ class MeetingViewModel(
     }
 
     fun discardLocalJob(meetingId: String) {
-        checkpointStore?.removeJobAndCleanTempChunks(currentUserId, meetingId)
+        if (processingTask?.isCompleted == false && _processingState.value?.meetingId == meetingId) return
+        if (!removeLocalJob(meetingId)) return
+        if (pendingSave?.payload?.meetingId == meetingId) pendingSave = null
+        if (_processingState.value?.meetingId == meetingId) _processingState.value = null
         if (activeJob?.meetingId == meetingId) {
             activeJob = null
         }
@@ -251,7 +262,14 @@ class MeetingViewModel(
         prices: List<ModelPrice>,
         preferredLanguage: String = "id"
     ) {
-        viewModelScope.launch {
+        launchProcessing {
+            val existing = checkpointStore?.listJobs(currentUserId)?.firstOrNull {
+                it.originalAudioPath == audioFile.absolutePath
+            }
+            if (existing != null) {
+                executeResumableJob(existing, tenant, taskConfigs, prices)
+                return@launchProcessing
+            }
             val resolvedTitle = judul.trim().ifBlank {
                 buildDefaultMeetingTitle(ownerDisplayNameProvider())
             }
@@ -284,7 +302,6 @@ class MeetingViewModel(
                 ukuranBytes = sizeBytes,
                 preferredLanguage = preferredLanguage
             )
-            if (!persistJob(initialJob)) return@launch
             executeResumableJob(
                 job = initialJob,
                 tenant = tenant,
@@ -310,7 +327,7 @@ class MeetingViewModel(
             }
             return
         }
-        viewModelScope.launch {
+        launchProcessing {
             executeResumableJob(job, tenant, taskConfigs, prices)
         }
     }
@@ -321,8 +338,12 @@ class MeetingViewModel(
         taskConfigs: List<com.example.data.model.TaskConfig>,
         prices: List<ModelPrice>
     ) {
-        viewModelScope.launch {
-            executeResumableJob(job, tenant, taskConfigs, prices)
+        launchProcessing {
+            if (job.ownerUserId != currentUserId) return@launchProcessing
+            val latest = activeJob?.takeIf { it.meetingId == job.meetingId }
+                ?: checkpointStore?.loadJob(currentUserId, job.meetingId)
+                ?: return@launchProcessing
+            executeResumableJob(latest, tenant, taskConfigs, prices)
         }
     }
 
@@ -332,11 +353,11 @@ class MeetingViewModel(
         taskConfigs: List<com.example.data.model.TaskConfig>,
         prices: List<ModelPrice>
     ) {
-        viewModelScope.launch {
+        launchProcessing {
             val savedCheckpoint = checkpointStore?.loadJob(currentUserId, meeting.id)
             if (savedCheckpoint != null) {
                 executeResumableJob(savedCheckpoint, tenant, taskConfigs, prices)
-                return@launch
+                return@launchProcessing
             }
             val path = meeting.localAudioPath
             val file = path?.let { File(it) }
@@ -354,7 +375,6 @@ class MeetingViewModel(
                     mergedSegments = meeting.segments,
                     mergedTranscriptText = meeting.transcriptText
                 )
-                if (!persistJob(job)) return@launch
                 executeResumableJob(job, tenant, taskConfigs, prices)
             } else if (file != null && file.exists()) {
                 val job = LocalProcessingJob(
@@ -366,10 +386,32 @@ class MeetingViewModel(
                     durasiDetik = meeting.durasiDetik.coerceAtLeast(1L),
                     ukuranBytes = file.length()
                 )
-                persistJob(job)
                 executeResumableJob(job, tenant, taskConfigs, prices)
             } else {
                 _uiMessage.value = "Berkas audio lokal tidak ditemukan untuk diulang."
+            }
+        }
+    }
+
+    private fun launchProcessing(block: suspend () -> Unit) {
+        if (_processingBusy.value) return
+        _processingBusy.value = true
+        processingTask = viewModelScope.launch {
+            try {
+                block()
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Exception) {
+                val message = toFriendlyIndonesianError(error)
+                _uiMessage.value = message
+                _processingState.value = _processingState.value?.copy(
+                    error = message.takeIf { pendingSave == null },
+                    saveStatus = if (pendingSave != null) SaveStatus.FAILED else SaveStatus.NONE,
+                    saveError = message.takeIf { pendingSave != null },
+                    canRetryProcessing = pendingSave == null && activeJob != null
+                )
+            } finally {
+                _processingBusy.value = false
             }
         }
     }
@@ -381,7 +423,13 @@ class MeetingViewModel(
         prices: List<ModelPrice>
     ) {
         var currentJob = job
-        activeJob = currentJob
+        if (job.ownerUserId != currentUserId || currentUserId.isBlank()) return
+        pendingSave = null
+        _processingState.value = ProcessingStepState(
+            meetingId = job.meetingId,
+            stepIndex = if (job.summaryDone) 4 else if (job.transcriptDone) 3 else 1,
+            stageDetail = "Memeriksa checkpoint lokal..."
+        )
         // Processing is unsafe without a durable checkpoint. Fail closed before AI/backend work.
         if (!persistJob(currentJob)) return
 
@@ -398,8 +446,9 @@ class MeetingViewModel(
         // Stage 1 & 2: Prepare valid chunks & transcribe ONLY pending/failed chunks
         if (!currentJob.transcriptDone) {
             val originalFile = File(currentJob.originalAudioPath)
-            if (!originalFile.exists() || originalFile.length() <= 0L) {
-                currentJob = currentJob.copy(lastError = "Berkas audio asli tidak ditemukan di perangkat.")
+            if (!originalFile.isFile || originalFile.length() <= 0L ||
+                (currentJob.ukuranBytes > 0 && originalFile.length() != currentJob.ukuranBytes)) {
+                currentJob = currentJob.copy(lastError = "Berkas audio asli hilang atau berubah sejak proses dimulai.")
                 if (!persistJob(currentJob)) return
                 _processingState.value = ProcessingStepState(
                     meetingId = currentJob.meetingId,
@@ -412,7 +461,13 @@ class MeetingViewModel(
 
             // Prepare chunks if not yet created OR if temp chunk files were purged by OS cache cleaner
             val needPrepareChunks = currentJob.chunks.isEmpty() || currentJob.chunks.any {
-                it.status != ChunkStatus.DONE && !File(it.filePath).exists()
+                it.status != ChunkStatus.DONE && runCatching {
+                    val file = File(it.filePath)
+                    val expected = if (it.isTempChunk && appContext != null) {
+                        AudioSegmenter.processingChunkFile(appContext, job.meetingId, it.index)
+                    } else originalFile.canonicalFile
+                    !file.isFile || file.length() == 0L || file.canonicalFile != expected
+                }.getOrDefault(true)
             }
             if (needPrepareChunks) {
                 _processingState.value = ProcessingStepState(
@@ -421,7 +476,7 @@ class MeetingViewModel(
                     stageDetail = "Memeriksa dan menyiapkan segmen audio..."
                 )
                 val preparedChunks: List<PreparedAudioChunk> = if (appContext != null) {
-                    val prepRes = withContext(Dispatchers.IO) {
+                    val prepRes = withContext(processingIoDispatcher) {
                         AudioSegmenter.prepareAudioChunks(
                             context = appContext,
                             sessionId = currentJob.meetingId,
@@ -462,7 +517,8 @@ class MeetingViewModel(
 
                 val mergedChunks = preparedChunks.map { p ->
                     val prev = oldDoneByIndex[p.index]
-                    if (prev != null) {
+                    if (prev != null && prev.startOffsetSec == p.startOffsetSec && prev.endOffsetSec == p.endOffsetSec &&
+                        prev.mimeType == p.mimeType) {
                         prev.copy(filePath = p.file.absolutePath, isTempChunk = p.isTempChunk)
                     } else {
                         AudioChunkCheckpoint(
@@ -496,7 +552,7 @@ class MeetingViewModel(
                 val progressText = if (totalChunks > 1) {
                     "Mentranskrip bagian ${i + 1} dari $totalChunks..."
                 } else {
-                    "Mentranskrip rekaman melalui SumoPod AI..."
+                    "Mentranskrip rekaman..."
                 }
                 _processingState.value = ProcessingStepState(
                     meetingId = currentJob.meetingId,
@@ -507,8 +563,20 @@ class MeetingViewModel(
                 )
 
                 val chunkFile = File(chunk.filePath)
-                val bytes = withContext(Dispatchers.IO) {
-                    runCatching { chunkFile.readBytes() }.getOrNull()
+                val bytes = withContext(processingIoDispatcher) {
+                    runCatching {
+                        val expected = if (chunk.isTempChunk && appContext != null) {
+                            AudioSegmenter.processingChunkFile(appContext, currentJob.meetingId, chunk.index)
+                        } else originalFile
+                        val length = chunkFile.length()
+                        if (chunkFile.canonicalFile != expected.canonicalFile ||
+                            length !in 1L..AudioSegmenter.MAX_DIRECT_UPLOAD_BYTES) return@runCatching null
+                        java.io.DataInputStream(chunkFile.inputStream()).use { input ->
+                            val bytes = ByteArray(length.toInt())
+                            input.readFully(bytes)
+                            bytes.takeIf { input.read() == -1 }
+                        }
+                    }.getOrNull()
                 }
                 if (bytes == null || bytes.isEmpty()) {
                     val errMsg = "Bagian audio ${i + 1}/$totalChunks tidak dapat dibaca. Rekaman asli tetap aman."
@@ -535,7 +603,15 @@ class MeetingViewModel(
                     preferredLanguage = currentJob.preferredLanguage
                 )
 
-                val trans = sttResult.getOrElse { err ->
+                val trans = sttResult.mapCatching { result ->
+                    val maxEnd = (chunk.endOffsetSec - chunk.startOffsetSec).coerceAtMost(Long.MAX_VALUE - 2) + 2
+                    require(result.segments.isNotEmpty() && result.segments.all {
+                        it.teks.isNotBlank() && it.mulaiDetik >= 0 &&
+                            it.selesaiDetik in it.mulaiDetik..maxEnd
+                    }) { "Respons transkripsi kosong atau stempel waktu segmen tidak valid." }
+                    result
+                }.getOrElse { err ->
+                    if (err is CancellationException) throw err
                     val errMsg = toFriendlyIndonesianError(err)
                     val fullErr = if (totalChunks > 1) {
                         "Transkripsi gagal pada bagian ${i + 1} dari $totalChunks: $errMsg"
@@ -557,6 +633,16 @@ class MeetingViewModel(
                     return
                 }
 
+                detectedLang = trans.bahasa.ifBlank { detectedLang }
+                updatedChunks[i] = chunk.copy(
+                    status = ChunkStatus.DONE,
+                    bahasa = detectedLang,
+                    segments = trans.segments,
+                    errorMessage = null
+                )
+                currentJob = currentJob.copy(chunks = updatedChunks, lastError = null)
+                if (!persistJob(currentJob)) return
+
                 if (tenant != null) {
                     tenantRepo.recordUsageLog(
                         tenant,
@@ -571,16 +657,6 @@ class MeetingViewModel(
                         )
                     )
                 }
-
-                detectedLang = trans.bahasa.ifBlank { detectedLang }
-                updatedChunks[i] = chunk.copy(
-                    status = ChunkStatus.DONE,
-                    bahasa = detectedLang,
-                    segments = trans.segments,
-                    errorMessage = null
-                )
-                currentJob = currentJob.copy(chunks = updatedChunks, lastError = null)
-                if (!persistJob(currentJob)) return
             }
 
             // Strictly verify ALL chunks succeeded before marking transcription done
@@ -642,6 +718,7 @@ class MeetingViewModel(
         val sumConfig = taskConfigs.firstOrNull { it.task == "meeting_summary" }
         val sumResult = aiService.generateSummaryAndActions(currentJob.mergedTranscriptText, sumConfig, prices)
         val summary = sumResult.getOrElse { err ->
+            if (err is CancellationException) throw err
             val errMsg = "Transkrip selesai, tetapi penyusunan notulen gagal: ${toFriendlyIndonesianError(err)}"
             currentJob = currentJob.copy(lastError = errMsg)
             if (!persistJob(currentJob)) return
@@ -653,19 +730,6 @@ class MeetingViewModel(
                 canRetryProcessing = true
             )
             return
-        }
-
-        if (tenant != null) {
-            tenantRepo.recordUsageLog(
-                tenant,
-                summary.meta.toUsageLog(
-                    tenantId = tenant.id,
-                    userId = currentUserId,
-                    meetingId = currentJob.meetingId,
-                    task = "meeting_summary",
-                    adminUids = tenant.adminUids
-                )
-            )
         }
 
         val nowLabel = SimpleDateFormat("dd MMM yyyy, HH:mm", Locale("id", "ID")).format(Date())
@@ -687,6 +751,19 @@ class MeetingViewModel(
         )
         if (!persistJob(currentJob)) return
 
+        if (tenant != null) {
+            tenantRepo.recordUsageLog(
+                tenant,
+                summary.meta.toUsageLog(
+                    tenantId = tenant.id,
+                    userId = currentUserId,
+                    meetingId = currentJob.meetingId,
+                    task = "meeting_summary",
+                    adminUids = tenant.adminUids
+                )
+            )
+        }
+
         pendingSave = PendingSaveContext(
             payload = currentJob.toSavePayload(),
             localAudioPath = currentJob.originalAudioPath.takeIf { it.isNotBlank() }
@@ -695,6 +772,7 @@ class MeetingViewModel(
     }
 
     fun retrySaveMeeting() {
+        if (processingTask?.isCompleted == false) return
         if (pendingSave == null) {
             val job = activeJob?.takeIf { it.summaryDone }
             if (job != null) {
@@ -706,8 +784,10 @@ class MeetingViewModel(
                 return
             }
         }
-        viewModelScope.launch {
-            executePendingSave()
+        launchProcessing {
+            val job = activeJob?.takeIf { it.summaryDone && it.meetingId == pendingSave?.payload?.meetingId }
+                ?: return@launchProcessing
+            if (persistJob(job)) executePendingSave()
         }
     }
 
@@ -723,6 +803,7 @@ class MeetingViewModel(
 
         personalRepo.saveMeetingBundle(ctx.payload)
             .onSuccess { saved ->
+                currentCoroutineContext().ensureActive()
                 _accountLinkRequired.value = false
                 personalRepo.rememberLocalAudioPath(currentUserId, meetingId, ctx.localAudioPath)
                 val hydrated = hydrateLocalAudioPath(saved)
@@ -733,8 +814,7 @@ class MeetingViewModel(
                 pendingSave = null
                 activeJob = null
                 // Clean ONLY temp chunks & checkpoint — NEVER delete originalAudioPath!
-                checkpointStore?.removeJobAndCleanTempChunks(currentUserId, meetingId)
-                appContext?.let { AudioSegmenter.cleanupTempChunkDir(it, meetingId) }
+                val checkpointRemoved = removeLocalJob(meetingId)
                 refreshPendingLocalJobs()
 
                 _processingState.value = ProcessingStepState(
@@ -742,9 +822,11 @@ class MeetingViewModel(
                     stepIndex = 4,
                     saveStatus = SaveStatus.SAVED
                 )
-                _uiMessage.value = "Transkrip dan notulen rapat tersimpan."
+                if (checkpointRemoved) _uiMessage.value = "Transkrip dan notulen rapat tersimpan."
             }
             .onFailure { err ->
+                if (err is CancellationException) throw err
+                currentCoroutineContext().ensureActive()
                 Log.w(TAG, "Auto-save to Supabase failed for $meetingId (retryable)", err)
                 val backendErr = err as? PersonalBackendException
                 val linkReq = backendErr?.isAccountLinkRequired == true
@@ -1225,7 +1307,7 @@ class MeetingViewModel(
     }
 
     fun bulkDeleteMeetings(tenant: Tenant?, selected: List<Meeting>) {
-        viewModelScope.launch {
+        launchProcessing {
             var deletedCount = 0
             selected.forEach { meeting ->
                 deleteMeetingEverywhere(tenant, meeting).onSuccess {
@@ -1250,7 +1332,7 @@ class MeetingViewModel(
     }
 
     fun deleteMeeting(tenant: Tenant?, meeting: Meeting) {
-        viewModelScope.launch {
+        launchProcessing {
             deleteMeetingEverywhere(tenant, meeting)
                 .onSuccess {
                     if (tenant != null) {
@@ -1263,24 +1345,30 @@ class MeetingViewModel(
     }
 
     private suspend fun deleteMeetingEverywhere(tenant: Tenant?, meeting: Meeting): Result<Unit> {
-        tenant?.let {
-            meetingRepo.deleteMeeting(it.id, meeting).onFailure { error ->
-                return Result.failure(error)
+        val removed = if (meeting.tenantId.isBlank()) {
+            personalRepo.deleteMeeting(meeting.id)
+        } else {
+            if (meeting.tenantId != tenant?.id) {
+                return Result.failure(IllegalArgumentException("Rapat berada di ruang kerja yang berbeda."))
             }
+            meetingRepo.deleteMeeting(tenant.id, meeting)
         }
-
-        personalRepo.deleteMeeting(meeting.id).onFailure { error ->
+        removed.onFailure { error ->
             return Result.failure(error)
         }
 
+        currentCoroutineContext().ensureActive()
         removeMeetingFromState(meeting.id)
-        checkpointStore?.removeJobAndCleanTempChunks(currentUserId, meeting.id)
+        if (activeJob?.meetingId == meeting.id) activeJob = null
+        if (pendingSave?.payload?.meetingId == meeting.id) pendingSave = null
+        removeLocalJob(meeting.id)
         personalRepo.rememberLocalAudioPath(currentUserId, meeting.id, null)
         meeting.localAudioPath?.let { path -> runCatching { File(path).delete() } }
         return Result.success(Unit)
     }
 
     fun clearSessionState() {
+        processingTask?.cancel()
         pendingSave = null
         activeJob = null
         activeDetailMeetingId = null
@@ -1295,6 +1383,7 @@ class MeetingViewModel(
     }
 
     fun dismissProcessingBanner() {
+        if (processingTask?.isCompleted == false) return
         val current = _processingState.value
         if (current?.saveStatus == SaveStatus.FAILED) {
             pendingSave = null
@@ -1306,11 +1395,24 @@ class MeetingViewModel(
         _uiMessage.value = null
     }
 
-    private fun persistJob(job: LocalProcessingJob): Boolean {
+    private fun removeLocalJob(meetingId: String): Boolean {
+        val existing = checkpointStore?.loadJob(currentUserId, meetingId)
+        if (checkpointStore?.removeJob(currentUserId, meetingId) == false) {
+            _uiMessage.value = "Checkpoint lokal belum dapat dibersihkan."
+            return false
+        }
+        if (appContext != null && existing != null) {
+            AudioSegmenter.cleanupTempChunkDir(appContext, meetingId, existing.originalAudioPath)
+        }
+        return true
+    }
+
+    private suspend fun persistJob(job: LocalProcessingJob): Boolean {
+        currentCoroutineContext().ensureActive()
         activeJob = job
         val store = checkpointStore
         // Jobs without a checkpoint store cannot be considered durable; expose that limitation.
-        val saved = store?.saveJob(job) ?: false
+        val saved = withContext(processingIoDispatcher) { store?.saveJob(job) ?: false }
         refreshPendingLocalJobs()
         if (!saved) {
             val message = "Checkpoint lokal gagal disimpan; kemajuan proses mungkin tidak tersimpan. Rekaman asli tetap dipertahankan."

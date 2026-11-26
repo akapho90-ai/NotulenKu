@@ -78,7 +78,8 @@ data class LocalProcessingJob(
         risiko = risiko,
         angkaKunci = angkaKunci,
         actionItems = actionItems,
-        hasSummary = true
+        hasSummary = true,
+        expectedFirebaseUid = ownerUserId
     )
 }
 
@@ -91,104 +92,99 @@ class LocalProcessingCheckpointStore(private val baseDir: File) {
 
     constructor(context: Context) : this(File(context.applicationContext.filesDir, "processing_jobs"))
 
-    private fun userDir(ownerUserId: String): File {
-        val safeOwner = ownerUserId.replace(Regex("[^a-zA-Z0-9_-]"), "_").take(64).ifBlank { "default" }
-        return File(baseDir, safeOwner).apply { mkdirs() }
+    private companion object {
+        // Several ViewModels/store instances can refer to the same files in this process.
+        val lock = Any()
+        val validId = Regex("[a-zA-Z0-9_-]{1,128}")
+        val jobName = Regex("job_([a-zA-Z0-9_-]{1,128})[.]json(?:[.]bak)?")
     }
 
-    private fun jobFile(ownerUserId: String, meetingId: String): File {
-        val safeId = meetingId.replace(Regex("[^a-zA-Z0-9_-]"), "_")
-        return File(userDir(ownerUserId), "job_$safeId.json")
-    }
+    private fun userDir(ownerUserId: String): File = File(baseDir, ownerUserId)
 
-    /** Durable checkpoint write; returns false if installation or verification fails. */
-    fun saveJob(job: LocalProcessingJob): Boolean {
-        if (job.ownerUserId.isBlank() || job.meetingId.isBlank()) return false
-        return runCatching {
-            val dir = userDir(job.ownerUserId)
-            val file = jobFile(job.ownerUserId, job.meetingId)
-            val tmp = File(dir, "${file.name}.tmp")
-            val backup = File(dir, "${file.name}.bak")
+    private fun jobFile(ownerUserId: String, meetingId: String): File =
+        File(userDir(ownerUserId), "job_$meetingId.json")
+
+    fun saveJob(job: LocalProcessingJob): Boolean = synchronized(lock) {
+        if (!validId.matches(job.ownerUserId) || !validId.matches(job.meetingId)) return false
+        if (!hasConsistentProgress(job)) return false
+        val file = jobFile(job.ownerUserId, job.meetingId)
+        val tmp = File(file.parentFile, "${file.name}.tmp")
+        val backup = File(file.parentFile, "${file.name}.bak")
+        runCatching {
+            check(file.parentFile?.let { it.isDirectory || it.mkdirs() } == true)
             val serialized = serializeJob(job).toString()
             FileOutputStream(tmp).use { stream ->
                 stream.write(serialized.toByteArray(Charsets.UTF_8))
-                stream.flush()
                 stream.fd.sync()
             }
-            if (file.exists()) {
-                if (backup.exists()) backup.delete()
-                if (!file.renameTo(backup)) {
-                    tmp.delete()
-                    throw IllegalStateException("Tidak dapat membuat backup checkpoint")
-                }
+            check(readValidated(tmp, job.ownerUserId, job.meetingId) != null)
+            if (readValidated(file, job.ownerUserId, job.meetingId) != null) {
+                check(!backup.exists() || (backup.isFile && backup.delete()))
+                check(file.renameTo(backup))
+            } else if (file.exists()) {
+                // An invalid primary must never replace an earlier valid backup.
+                check(file.isFile && file.delete())
             }
-            if (!tmp.renameTo(file)) {
-                if (backup.exists()) backup.renameTo(file)
-                throw IllegalStateException("Tidak dapat memasang checkpoint baru")
-            }
-            val verified = runCatching { JSONObject(file.readText()).getString("meetingId") == job.meetingId }.getOrDefault(false)
-            if (!verified) {
+            check(tmp.renameTo(file))
+            if (readValidated(file, job.ownerUserId, job.meetingId) == null) {
                 file.delete()
-                if (backup.exists()) backup.renameTo(file)
-                throw IllegalStateException("Verifikasi checkpoint gagal")
+                error("Verifikasi checkpoint gagal")
             }
-            backup.delete()
             true
         }.onFailure {
             Log.e(TAG, "Failed saving processing checkpoint ${job.meetingId}", it)
         }.getOrDefault(false)
     }
 
+    private fun hasConsistentProgress(job: LocalProcessingJob): Boolean =
+        job.chunks.withIndex().all { (index, chunk) ->
+            chunk.index == index && chunk.startOffsetSec >= 0 &&
+                chunk.endOffsetSec > chunk.startOffsetSec && chunk.filePath.isNotBlank() &&
+                (chunk.status != ChunkStatus.DONE || job.transcriptDone || chunk.segments.any { it.teks.isNotBlank() })
+        } && (!job.transcriptDone || (job.mergedTranscriptText.isNotBlank() &&
+            job.chunks.all { it.status == ChunkStatus.DONE })) &&
+            (!job.summaryDone || (job.transcriptDone && job.ringkasan.isNotBlank()))
+
     private fun readValidated(file: File, ownerUserId: String, meetingId: String): LocalProcessingJob? =
         runCatching {
-            deserializeJob(JSONObject(file.readText())).takeIf {
-                it.ownerUserId == ownerUserId && it.meetingId == meetingId
+            val stored = deserializeJob(JSONObject(file.readText()))
+            val job = if (stored.transcriptDone) stored else stored.copy(chunks = stored.chunks.map { chunk ->
+                if (chunk.status == ChunkStatus.DONE && chunk.segments.none { it.teks.isNotBlank() }) {
+                    chunk.copy(status = ChunkStatus.FAILED, errorMessage = "Transkripsi bagian ini kosong.")
+                } else chunk
+            })
+            val recoverable = if (job.summaryDone && job.ringkasan.isBlank() && job.transcriptDone) {
+                job.copy(summaryDone = false)
+            } else job
+            recoverable.takeIf {
+                it.ownerUserId == ownerUserId && it.meetingId == meetingId && hasConsistentProgress(it)
             }
         }.getOrNull()
 
-    fun loadJob(ownerUserId: String, meetingId: String): LocalProcessingJob? {
-        if (ownerUserId.isBlank() || meetingId.isBlank()) return null
+    fun loadJob(ownerUserId: String, meetingId: String): LocalProcessingJob? = synchronized(lock) {
+        if (!validId.matches(ownerUserId) || !validId.matches(meetingId)) return null
         val file = jobFile(ownerUserId, meetingId)
-        val backup = File(file.parentFile, "${file.name}.bak")
-        val primary = if (file.exists()) readValidated(file, ownerUserId, meetingId) else null
-        if (primary != null) return primary
-
-        // Recover the previous durable checkpoint only if the primary is absent or invalid.
-        val recovered = if (backup.exists()) readValidated(backup, ownerUserId, meetingId) else null
-        if (recovered != null) {
-            runCatching {
-                if (file.exists()) file.delete()
-                backup.copyTo(file, overwrite = true)
-                backup.delete()
-            }.onFailure { Log.e(TAG, "Failed restoring checkpoint backup", it) }
-            return recovered
-        }
-        return null
+        readValidated(file, ownerUserId, meetingId)
+            ?: readValidated(File(file.parentFile, "${file.name}.bak"), ownerUserId, meetingId)
     }
 
-    fun listJobs(ownerUserId: String): List<LocalProcessingJob> {
-        if (ownerUserId.isBlank()) return emptyList()
-        val dir = userDir(ownerUserId)
-        val files = dir.listFiles { f -> f.isFile && f.name.endsWith(".json") } ?: return emptyList()
-        return files.mapNotNull { f ->
-            runCatching { deserializeJob(JSONObject(f.readText())) }
-                .getOrNull()
-                ?.takeIf { it.ownerUserId == ownerUserId && it.meetingId.isNotBlank() }
-        }.sortedByDescending { it.createdAtMs }
+    fun listJobs(ownerUserId: String): List<LocalProcessingJob> = synchronized(lock) {
+        if (!validId.matches(ownerUserId)) return emptyList()
+        userDir(ownerUserId).listFiles().orEmpty().asSequence()
+            .filter { it.isFile }
+            .mapNotNull { jobName.matchEntire(it.name)?.groupValues?.get(1) }
+            .distinct()
+            .mapNotNull { loadJob(ownerUserId, it) }
+            .sortedByDescending { it.createdAtMs }
+            .toList()
     }
 
-    /**
-     * Removes checkpoint & temporary chunks safely after full server save (or explicit user discard).
-     * NEVER deletes the original recording file (job.originalAudioPath).
-     */
-    fun removeJobAndCleanTempChunks(ownerUserId: String, meetingId: String) {
-        val existing = loadJob(ownerUserId, meetingId)
-        if (existing != null) {
-            existing.chunks
-                .filter { it.isTempChunk && it.filePath != existing.originalAudioPath }
-                .forEach { chunk -> runCatching { File(chunk.filePath).delete() } }
-        }
-        runCatching { jobFile(ownerUserId, meetingId).delete() }
+    /** Removes temporary checkpoint files first so an old backup cannot resurrect a removed job. */
+    fun removeJob(ownerUserId: String, meetingId: String): Boolean = synchronized(lock) {
+        if (!validId.matches(ownerUserId) || !validId.matches(meetingId)) return false
+        val file = jobFile(ownerUserId, meetingId)
+        listOf(File(file.parentFile, "${file.name}.tmp"), File(file.parentFile, "${file.name}.bak"), file)
+            .all { !it.exists() || (it.isFile && it.delete()) }
     }
 
     private fun serializeJob(job: LocalProcessingJob): JSONObject = JSONObject().apply {
@@ -236,7 +232,7 @@ class LocalProcessingCheckpointStore(private val baseDir: File) {
         val chunksArr = obj.optJSONArray("chunks") ?: JSONArray()
         val chunks = buildList {
             for (i in 0 until chunksArr.length()) {
-                val c = chunksArr.optJSONObject(i) ?: continue
+                val c = chunksArr.getJSONObject(i)
                 add(
                     AudioChunkCheckpoint(
                         index = c.optInt("index", i),

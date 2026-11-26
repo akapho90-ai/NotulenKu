@@ -230,6 +230,7 @@ private fun AuthenticatedShell(
     val meetingsState by meetingVm.meetingsState.collectAsStateWithLifecycle()
     val detailState by meetingVm.detailState.collectAsStateWithLifecycle()
     val processingState by meetingVm.processingState.collectAsStateWithLifecycle()
+    val processingBusy by meetingVm.processingBusy.collectAsStateWithLifecycle()
     val pendingLocalJobs by meetingVm.pendingLocalJobs.collectAsStateWithLifecycle()
     val periodicSummaryState by meetingVm.periodicSummaryState.collectAsStateWithLifecycle()
     val accountLinkRequired by meetingVm.accountLinkRequired.collectAsStateWithLifecycle()
@@ -567,6 +568,7 @@ private fun AuthenticatedShell(
                                 activeTenant = activeTenant,
                                 initialMode = mode,
                                 processingState = processingState,
+                                processingBusy = processingBusy,
                                 onProcessAudio = { judul, file, mimeType, durationSec ->
                                     meetingVm.processAudioMeeting(
                                         tenant = activeTenant,

@@ -1,5 +1,6 @@
 package com.example.data.ai
 
+import com.example.core.readReply
 import android.util.Base64
 import com.example.BuildConfig
 import com.example.core.AppConstants
@@ -202,8 +203,8 @@ class MeetingBackendAiClient(
             .header("Content-Type", "application/json")
             .build()
 
-        client.newCall(request).execute().use { response ->
-            val raw = response.body?.string().orEmpty()
+        client.newCall(request).readReply().let { response ->
+            val raw = response.body.orEmpty()
             val json = runCatching { JSONObject(raw) }.getOrNull()
             if (!response.isSuccessful || json?.has("error") == true) {
                 val errObj = json?.optJSONObject("error")

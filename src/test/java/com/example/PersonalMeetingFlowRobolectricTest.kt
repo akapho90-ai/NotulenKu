@@ -21,6 +21,7 @@ import com.example.data.repository.MeetingRepository
 import com.example.data.repository.PersonalBackendException
 import com.example.data.repository.PersonalMeetingDataSource
 import com.example.data.repository.PersonalMeetingRepository
+import com.example.data.repository.LocalProcessingCheckpointStore
 import com.example.data.repository.PersonalMeetingSavePayload
 import com.example.data.repository.TenantRepository
 import com.example.ui.screens.HistoryScreen
@@ -252,7 +253,8 @@ class PersonalMeetingFlowRobolectricTest {
         dataSource: FakePersonalDataSource,
         aiService: AiService = FakeAiService(),
         uid: String = dataSource.activeUid,
-        autoLoad: Boolean = false
+        autoLoad: Boolean = false,
+        checkpointDir: File = java.nio.file.Files.createTempDirectory(context.cacheDir.toPath(), "checkpoint-").toFile()
     ): MeetingViewModel {
         val db = FirebaseFirestore.getInstance(context.getString(R.string.firestore_database_id))
         val auth = FirebaseAuth.getInstance()
@@ -262,7 +264,9 @@ class PersonalMeetingFlowRobolectricTest {
             tenantRepo = TenantRepository(db, auth),
             aiService = aiService,
             currentUserId = uid,
-            autoLoadOnInit = autoLoad
+            autoLoadOnInit = autoLoad,
+            checkpointStore = LocalProcessingCheckpointStore(checkpointDir),
+            processingIoDispatcher = testDispatcher
         )
     }
 
@@ -270,7 +274,8 @@ class PersonalMeetingFlowRobolectricTest {
     fun saveFailureAndRetry_preservesUuidAndAiResults_withoutRerunningAi_andAppearsOnRestart() = runTest {
         val ds = FakePersonalDataSource("uid_user_a").apply { failNextSave = true }
         val ai = FakeAiService()
-        val vm = createViewModel(ds, ai, uid = "uid_user_a", autoLoad = false)
+        val checkpointDir = java.nio.file.Files.createTempDirectory(context.cacheDir.toPath(), "resume-").toFile()
+        val vm = createViewModel(ds, ai, uid = "uid_user_a", checkpointDir = checkpointDir)
 
         val tempAudio = File.createTempFile("test_rec_", ".m4a", context.cacheDir).apply {
             writeBytes(byteArrayOf(1, 2, 3, 4))
@@ -285,6 +290,7 @@ class PersonalMeetingFlowRobolectricTest {
             taskConfigs = emptyList(),
             prices = emptyList()
         )
+        vm.processAudioMeeting(null, "Duplicate action", tempAudio, "audio/mp4", 45L, emptyList(), emptyList())
         advanceUntilIdle()
 
         // First save failed after AI succeeded once
@@ -297,17 +303,23 @@ class PersonalMeetingFlowRobolectricTest {
         val preservedUuid = failedState.meetingId
         assertTrue(preservedUuid.isNotBlank())
 
-        // Retry save ONLY (must NOT re-run STT or summary)
-        vm.retrySaveMeeting()
+        // A fresh ViewModel loads the durable job, and resumes only its save stage.
+        vm.clearSessionState()
+        val resumedVm = createViewModel(ds, ai, uid = "uid_user_a", checkpointDir = checkpointDir)
+        val pending = resumedVm.pendingLocalJobs.value.single()
+        resumedVm.resumeLocalJob(pending, null, emptyList(), emptyList())
+        resumedVm.resumeLocalJob(pending, null, emptyList(), emptyList())
         advanceUntilIdle()
 
-        val savedState = vm.processingState.value!!
+        val savedState = resumedVm.processingState.value!!
         assertEquals(SaveStatus.SAVED, savedState.saveStatus)
         assertEquals(preservedUuid, savedState.meetingId)
         assertEquals(1, ai.sttCalls)
         assertEquals(1, ai.summaryCalls)
         assertEquals(2, ds.saveCallCount)
         assertEquals(1, ds.dbById.size)
+        assertTrue(resumedVm.pendingLocalJobs.value.isEmpty())
+        assertTrue(tempAudio.exists())
 
         // Simulate app restart with fresh ViewModel instance
         val restartedVm = createViewModel(ds, ai, uid = "uid_user_a", autoLoad = true)
@@ -332,6 +344,23 @@ class PersonalMeetingFlowRobolectricTest {
         userBVm.loadMeetingDetail(preservedUuid, forceSpinner = true)
         advanceUntilIdle()
         assertTrue(userBVm.detailState.value is UiState.Error)
+    }
+
+    @Test
+    fun failedInitialCheckpointStartsNoAiOrBackendSave() = runTest {
+        val ds = FakePersonalDataSource("uid_user_a")
+        val ai = FakeAiService()
+        val blockedDir = File.createTempFile("blocked-", ".txt", context.cacheDir)
+        val audio = File.createTempFile("recording-", ".m4a", context.cacheDir).apply { writeText("audio") }
+        val vm = createViewModel(ds, ai, checkpointDir = blockedDir)
+        vm.processAudioMeeting(null, "Rapat", audio, "audio/mp4", 10, emptyList(), emptyList())
+        advanceUntilIdle()
+
+        assertTrue(vm.processingState.value?.canRetryProcessing == true)
+        assertEquals(0, ai.sttCalls)
+        assertEquals(0, ai.summaryCalls)
+        assertEquals(0, ds.saveCallCount)
+        assertTrue(audio.isFile)
     }
 
     @Test

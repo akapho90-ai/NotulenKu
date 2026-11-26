@@ -272,21 +272,23 @@ class NotulenKuRevisionTest {
             currentUserId = "uid_chunk_user",
             autoLoadOnInit = false,
             ownerDisplayNameProvider = { "Budi Santoso" },
-            appContext = null,
-            checkpointStore = store
+            appContext = context,
+            checkpointStore = store,
+            processingIoDispatcher = testDispatcher
         )
 
         val originalAudio = File.createTempFile("orig_rec_", ".m4a", context.filesDir).apply {
             writeBytes("ORIGINAL_AUDIO".toByteArray())
         }
-        val chunk1File = File.createTempFile("chunk_1_", ".m4a", context.cacheDir).apply {
+        val meetingId = "44444444-4444-4444-8444-444444444444"
+        val chunk1File = AudioSegmenter.processingChunkFile(context, meetingId, 0).apply {
+            parentFile!!.mkdirs()
             writeBytes("CHUNK_1".toByteArray())
         }
-        val chunk2File = File.createTempFile("chunk_2_", ".m4a", context.cacheDir).apply {
+        val chunk2File = AudioSegmenter.processingChunkFile(context, meetingId, 1).apply {
             writeBytes("CHUNK_2".toByteArray())
         }
 
-        val meetingId = "44444444-4444-4444-8444-444444444444"
         val preChunkedJob = LocalProcessingJob(
             meetingId = meetingId,
             ownerUserId = "uid_chunk_user",
@@ -381,6 +383,23 @@ class NotulenKuRevisionTest {
 
         val shaMsg = mapGoogleSignInError(IllegalStateException("ApiException: 10 DEVELOPER_ERROR"))
         assertTrue(shaMsg.contains("SHA-1", ignoreCase = true))
+    }
+
+    @Test
+    fun transcriptionRejectsPartialOrMalformedSegments() {
+        val ai = AiService()
+        val valid = """{"pembicara":"A","mulaiDetik":0,"selesaiDetik":2,"teks":"Halo"}"""
+        val invalidRows = listOf(
+            "null",
+            """{"mulaiDetik":-1,"selesaiDetik":3,"teks":"invalid"}""",
+            """{"mulaiDetik":3,"selesaiDetik":2,"teks":"invalid"}""",
+            """{"mulaiDetik":2,"selesaiDetik":3,"teks":"  "}""",
+            """{"mulaiDetik":2,"teks":"waktu akhir hilang"}"""
+        )
+        invalidRows.forEach { row ->
+            assertTrue(runCatching { ai.parseTranscriptionJson("""{"segmen":[$valid,$row]}""", "id") }.isFailure)
+        }
+        assertTrue(runCatching { ai.parseTranscriptionJson("""{"segmen":[]}""", "id") }.isFailure)
     }
 
     @Test

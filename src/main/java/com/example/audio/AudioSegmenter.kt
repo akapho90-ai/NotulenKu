@@ -71,74 +71,62 @@ object AudioSegmenter {
         orderedChunkResults: List<Pair<Long, List<TranscriptSegment>>>
     ): List<TranscriptSegment> {
         val merged = mutableListOf<TranscriptSegment>()
-        for ((offsetSec, rawSegments) in orderedChunkResults) {
-            val adjusted = rawSegments
-                .filter { it.teks.isNotBlank() }
-                .map { seg ->
-                    val start = (seg.mulaiDetik + offsetSec).coerceAtLeast(0L)
-                    val end = (seg.selesaiDetik + offsetSec).coerceAtLeast(start)
-                    seg.copy(mulaiDetik = start, selesaiDetik = end)
+        for ((offsetSec, segments) in orderedChunkResults) {
+            // Earlier rows from this same chunk are never candidates for boundary deduplication.
+            val previousCount = merged.size
+            for (local in segments.sortedBy { it.mulaiDetik }) {
+                if (offsetSec < 0 || local.mulaiDetik < 0 || local.selesaiDetik < local.mulaiDetik ||
+                    local.selesaiDetik > Long.MAX_VALUE - offsetSec || local.teks.isBlank()) continue
+                val segment = local.copy(
+                    mulaiDetik = offsetSec + local.mulaiDetik,
+                    selesaiDetik = offsetSec + local.selesaiDetik
+                )
+                val index = (previousCount - 1 downTo 0).firstOrNull { i ->
+                    val previous = merged[i]
+                    previous.pembicara == segment.pembicara &&
+                        previous.mulaiDetik < segment.selesaiDetik &&
+                        segment.mulaiDetik < previous.selesaiDetik
                 }
-                .sortedBy { it.mulaiDetik }
-
-            for (seg in adjusted) {
-                val prev = merged.lastOrNull()
-                if (prev != null && isBoundaryDuplicate(prev, seg)) {
-                    // Keep the longer/more complete utterance at the overlap boundary
-                    if (seg.teks.length > prev.teks.length) {
-                        merged[merged.lastIndex] = prev.copy(
-                            selesaiDetik = maxOf(prev.selesaiDetik, seg.selesaiDetik),
-                            teks = seg.teks
-                        )
-                    }
+                val previous = index?.let { merged[it] }
+                if (previous != null && isBoundaryDuplicate(previous, segment)) {
+                    merged[index] = previous.copy(selesaiDetik = maxOf(previous.selesaiDetik, segment.selesaiDetik))
                     continue
                 }
-                val cleanedText = trimOverlappingPrefix(prev?.teks, seg.teks)
-                if (cleanedText.isNotBlank()) {
-                    merged.add(seg.copy(teks = cleanedText))
-                }
+                val cleaned = if (previous != null && segment.selesaiDetik > previous.selesaiDetik) {
+                    trimOverlappingPrefix(previous.teks, segment.teks)
+                } else segment.teks.trim()
+                merged.add(segment.copy(teks = cleaned))
             }
         }
-        return merged
+        return merged.sortedBy { it.mulaiDetik }
     }
 
+    private val word = Regex("[\\p{L}\\p{M}\\p{N}]+")
+
+    private fun normalizeWord(value: String): String =
+        java.text.Normalizer.normalize(value, java.text.Normalizer.Form.NFC).lowercase()
+
     internal fun isBoundaryDuplicate(prev: TranscriptSegment, next: TranscriptSegment): Boolean {
-        val timeClose = next.mulaiDetik <= prev.selesaiDetik + 4L
-        if (!timeClose) return false
-        val a = normalizeWords(prev.teks)
-        val b = normalizeWords(next.teks)
-        if (a.isEmpty() || b.isEmpty()) return false
-        if (a == b) return true
-        // Near-duplicate when one contains the other across a chunk overlap window
-        val aStr = a.joinToString(" ")
-        val bStr = b.joinToString(" ")
-        return aStr.contains(bStr) || bStr.contains(aStr)
+        if (prev.pembicara != next.pembicara || next.mulaiDetik >= prev.selesaiDetik ||
+            prev.mulaiDetik >= next.selesaiDetik) return false
+        val before = word.findAll(prev.teks).map { normalizeWord(it.value) }.toList()
+        val after = word.findAll(next.teks).map { normalizeWord(it.value) }.toList()
+        return before.size >= 3 && before == after
     }
 
     internal fun trimOverlappingPrefix(prevText: String?, nextText: String): String {
-        val cleanNext = nextText.trim()
-        if (prevText.isNullOrBlank() || cleanNext.isBlank()) return cleanNext
-        val prevWords = normalizeWords(prevText)
-        val nextWordsRaw = cleanNext.split(Regex("\\s+"))
-        val nextWordsNorm = nextWordsRaw.map { it.lowercase().replace(Regex("[^a-z0-9]"), "") }
-        val maxCheck = minOf(prevWords.size, nextWordsNorm.size, 8)
-        for (len in maxCheck downTo 3) {
-            val prevSuffix = prevWords.takeLast(len)
-            val nextPrefix = nextWordsNorm.take(len)
-            if (prevSuffix == nextPrefix) {
-                val remainder = nextWordsRaw.drop(len).joinToString(" ").trim()
-                return remainder
+        val clean = nextText.trim()
+        if (prevText.isNullOrBlank()) return clean
+        val before = word.findAll(prevText).map { normalizeWord(it.value) }.toList()
+        val after = word.findAll(clean).toList()
+        val normalized = after.map { normalizeWord(it.value) }
+        for (count in minOf(before.size, after.size - 1, 8) downTo 3) {
+            if (before.takeLast(count) == normalized.take(count)) {
+                return clean.substring(after[count].range.first)
             }
         }
-        return cleanNext
+        return clean
     }
-
-    private fun normalizeWords(text: String): List<String> =
-        text.lowercase()
-            .replace(Regex("[^a-z0-9\\s]"), " ")
-            .trim()
-            .split(Regex("\\s+"))
-            .filter { it.isNotBlank() }
 
     /**
      * Splits a long audio file into valid standalone M4A segments using MediaExtractor + MediaMuxer
@@ -152,10 +140,29 @@ object AudioSegmenter {
         knownDurationSec: Long,
         chunkDurationSec: Long = DEFAULT_CHUNK_DURATION_SEC
     ): Result<List<PreparedAudioChunk>> {
-        if (!sourceFile.exists() || sourceFile.length() <= 0L) {
+        if (!sourceFile.isFile || sourceFile.length() <= 0L) {
             return Result.failure(IllegalArgumentException("Berkas audio asli tidak ditemukan atau kosong."))
         }
-        val detectedDurationSec = detectDurationSeconds(sourceFile).coerceAtLeast(knownDurationSec).coerceAtLeast(1L)
+        if (!processingSessionId.matches(sessionId)) {
+            return Result.failure(IllegalArgumentException("ID pemrosesan audio tidak valid."))
+        }
+        val readable = runCatching {
+            val extractor = MediaExtractor()
+            try {
+                extractor.setDataSource(sourceFile.absolutePath)
+                val track = findAudioTrackIndex(extractor)
+                if (track < 0) false else {
+                    extractor.selectTrack(track)
+                    extractor.sampleTrackIndex == track
+                }
+            } finally {
+                extractor.release()
+            }
+        }.getOrDefault(false)
+        if (!readable) return Result.failure(IllegalArgumentException("Berkas audio tidak memuat sampel yang dapat dibaca."))
+        val metadataMs = detectDurationMillis(sourceFile)
+        val detectedDurationSec = if (metadataMs > 0) (metadataMs - 1L) / 1_000L + 1L
+            else knownDurationSec.coerceAtLeast(1L)
         val needsSplitting = sourceFile.length() > MAX_DIRECT_UPLOAD_BYTES || detectedDurationSec > (chunkDurationSec + 60L)
 
         if (!needsSplitting) {
@@ -173,43 +180,49 @@ object AudioSegmenter {
             )
         }
 
-        val chunkRoot = File(android.os.Environment.getExternalStorageDirectory(), "Android/media/NotulenKu/chunk")
-        cleanupExpiredChunks(chunkRoot, sessionId)
-        val chunkDir = File(chunkRoot, sessionId).apply { mkdirs() }
+        val chunkDir = processingChunkFile(context, sessionId, 0).parentFile ?: return Result.failure(
+            IllegalStateException("Folder segmen audio lokal tidak tersedia.")
+        )
+        if (!chunkDir.isDirectory && !chunkDir.mkdirs()) {
+            return Result.failure(IllegalStateException("Folder segmen audio lokal tidak dapat dibuat."))
+        }
         // Adjust chunk duration downward if bitrate is high so each chunk stays safely under 8 MB
         val bytesPerSec = (sourceFile.length().toDouble() / detectedDurationSec.toDouble()).coerceAtLeast(1000.0)
-        val sizeSafeChunkSec = ((MAX_DIRECT_UPLOAD_BYTES * 0.75) / bytesPerSec).toLong().coerceIn(60L, chunkDurationSec)
+        val sizeSafeChunkSec = ((MAX_DIRECT_UPLOAD_BYTES * 0.75) / bytesPerSec).toLong()
+            .coerceIn(DEFAULT_OVERLAP_SEC + 1L, chunkDurationSec.coerceAtLeast(DEFAULT_OVERLAP_SEC + 1L))
         val windows = planChunkWindows(detectedDurationSec, sizeSafeChunkSec, DEFAULT_OVERLAP_SEC)
 
         val chunks = mutableListOf<PreparedAudioChunk>()
         for (window in windows) {
-            val outFile = File(chunkDir, "chunk_${"%04d".format(window.index)}.m4a")
+            val outFile = processingChunkFile(context, sessionId, window.index)
+            if (outFile.canonicalFile == sourceFile.canonicalFile) {
+                return Result.failure(IllegalArgumentException("Lokasi segmen bertabrakan dengan audio asli."))
+            }
             val extractRes = extractValidM4aSegment(
                 sourceFile = sourceFile,
                 destFile = outFile,
                 startUs = window.startSec * 1_000_000L,
                 endUs = window.endSec * 1_000_000L
             )
-            if (extractRes.isFailure) {
+            if (extractRes.isFailure || !outFile.isFile || outFile.length() !in 1L..MAX_DIRECT_UPLOAD_BYTES) {
                 // Clean partial temp chunks only (NEVER touch sourceFile)
                 chunks.filter { it.isTempChunk }.forEach { runCatching { it.file.delete() } }
+                runCatching { outFile.delete() }
                 return Result.failure(
                     extractRes.exceptionOrNull()
                         ?: IllegalStateException("Gagal memecah audio panjang menjadi segmen valid.")
                 )
             }
-            if (outFile.exists() && outFile.length() > 0L) {
-                chunks.add(
-                    PreparedAudioChunk(
-                        index = window.index,
-                        startOffsetSec = window.startSec,
-                        endOffsetSec = window.endSec,
-                        file = outFile,
-                        mimeType = "audio/mp4",
-                        isTempChunk = true
-                    )
+            chunks.add(
+                PreparedAudioChunk(
+                    index = window.index,
+                    startOffsetSec = window.startSec,
+                    endOffsetSec = window.endSec,
+                    file = outFile,
+                    mimeType = "audio/mp4",
+                    isTempChunk = true
                 )
-            }
+            )
         }
 
         if (chunks.isEmpty()) {
@@ -251,42 +264,43 @@ object AudioSegmenter {
             val muxTrackIdx = muxer.addTrack(format)
             muxer.start()
 
-            extractor.seekTo(startUs, MediaExtractor.SEEK_TO_CLOSEST_SYNC)
+            extractor.seekTo(startUs, MediaExtractor.SEEK_TO_PREVIOUS_SYNC)
             val maxBufSize = runCatching { format.getInteger(MediaFormat.KEY_MAX_INPUT_SIZE) }
                 .getOrDefault(256 * 1024)
                 .coerceIn(64 * 1024, 1024 * 1024)
             val buffer = ByteBuffer.allocate(maxBufSize)
             val info = MediaCodec.BufferInfo()
-            var basePtsUs = -1L
+            var wroteSample = false
 
             while (true) {
                 info.offset = 0
                 info.size = extractor.readSampleData(buffer, 0)
                 if (info.size < 0) break
                 val sampleTimeUs = extractor.sampleTime
-                if (sampleTimeUs > endUs) break
-                if (sampleTimeUs >= startUs - 50_000L) {
-                    if (basePtsUs < 0L) basePtsUs = sampleTimeUs
-                    info.presentationTimeUs = (sampleTimeUs - basePtsUs).coerceAtLeast(0L)
+                if (sampleTimeUs >= endUs) break
+                if (info.size > 0 && sampleTimeUs >= startUs) {
+                    info.presentationTimeUs = sampleTimeUs - startUs
                     info.flags = extractor.sampleFlags
                     muxer.writeSampleData(muxTrackIdx, buffer, info)
+                    wroteSample = true
                 }
                 extractor.advance()
             }
 
+            check(wroteSample) { "Tidak ada sampel audio pada rentang segmen." }
             muxer.stop()
             muxer.release()
             muxer = null
-            extractor.release()
             Result.success(destFile)
         } catch (e: Exception) {
             Log.e(TAG, "Failed extracting valid audio segment", e)
-            runCatching { muxer?.release() }
-            runCatching { extractor.release() }
             runCatching { if (destFile.exists()) destFile.delete() }
             Result.failure(
                 IllegalStateException("Gagal memecah audio panjang secara aman: ${e.localizedMessage ?: "format tidak didukung"}")
             )
+        } finally {
+            runCatching { muxer?.release() }
+            runCatching { extractor.release() }
         }
     }
 
@@ -387,12 +401,14 @@ object AudioSegmenter {
         }
     }
 
-    fun detectDurationSeconds(file: File): Long {
+    fun detectDurationSeconds(file: File): Long = detectDurationMillis(file) / 1_000L
+
+    private fun detectDurationMillis(file: File): Long {
         val retriever = MediaMetadataRetriever()
         return try {
             retriever.setDataSource(file.absolutePath)
             val durMs = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull() ?: 0L
-            (durMs / 1000L).coerceAtLeast(0L)
+            durMs.coerceAtLeast(0L)
         } catch (_: Exception) {
             0L
         } finally {
@@ -400,23 +416,28 @@ object AudioSegmenter {
         }
     }
 
-    private const val CHUNK_RETENTION_MS = 72L * 60L * 60L * 1000L
+    private val processingSessionId = Regex("[a-zA-Z0-9_-]{1,128}")
+    private val processingChunkName = Regex("chunk_[0-9]{4,}[.]m4a")
 
-    fun cleanupExpiredChunks(root: File, activeSessionId: String? = null, nowMs: Long = System.currentTimeMillis()): Int {
-        if (!root.exists()) return 0
-        var removed = 0
-        root.listFiles()?.filter { it.isDirectory && it.name != activeSessionId }?.forEach { dir ->
-            val touched = dir.lastModified().takeIf { it > 0L } ?: nowMs
-            if (nowMs - touched >= CHUNK_RETENTION_MS && runCatching { dir.deleteRecursively() }.getOrDefault(false)) removed++
+    internal fun processingChunkFile(context: Context, sessionId: String, index: Int): File {
+        require(processingSessionId.matches(sessionId) && index >= 0)
+        val root = File(context.cacheDir, "processing_audio_chunks").canonicalFile
+        val dir = File(root, sessionId)
+        check(dir.canonicalFile == dir) { "Folder segmen audio tidak valid." }
+        return File(dir, "chunk_${index.toString().padStart(4, '0')}.m4a").also {
+            check(it.canonicalFile == it) { "Lokasi segmen audio tidak valid." }
         }
-        return removed
     }
 
-    fun cleanupTempChunkDir(context: Context, sessionId: String) {
-        if (sessionId.isBlank()) return
-        val root = File(android.os.Environment.getExternalStorageDirectory(), "Android/media/NotulenKu/chunk")
-        val dir = File(root, sessionId)
-        if (dir.exists()) runCatching { dir.deleteRecursively() }
+    fun cleanupTempChunkDir(context: Context, sessionId: String, originalAudioPath: String?) {
+        runCatching {
+            val dir = processingChunkFile(context, sessionId, 0).parentFile ?: return
+            val original = originalAudioPath?.takeIf { it.isNotBlank() }?.let { File(it).canonicalFile }
+            dir.listFiles().orEmpty().filter {
+                it.isFile && processingChunkName.matches(it.name) && it.canonicalFile == it && it != original
+            }.forEach { it.delete() }
+            dir.delete() // Succeeds only when empty.
+        }
     }
 
     private fun findAudioTrackIndex(extractor: MediaExtractor): Int {

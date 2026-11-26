@@ -1,5 +1,6 @@
 package com.example.data.ai
 
+import com.example.core.readReply
 import com.example.data.model.AiConnection
 import com.example.data.model.ProviderPresets
 import com.example.data.model.TranscriptSegment
@@ -12,6 +13,7 @@ import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONArray
 import org.json.JSONObject
+import kotlinx.coroutines.CancellationException
 import java.io.IOException
 import java.util.concurrent.TimeUnit
 
@@ -27,6 +29,8 @@ data class ProviderSttResponse(
     val segments: List<TranscriptSegment>,
     val latencyMs: Long
 )
+
+internal class ProviderHttpException(val status: Int, message: String) : IOException(message)
 
 class CustomProviderClient {
     private val baseClient = OkHttpClient.Builder()
@@ -97,7 +101,7 @@ class CustomProviderClient {
                     .build()
             }
 
-            client.newCall(request).execute().use { resp ->
+            client.newCall(request).readReply().let { resp ->
                 val latency = System.currentTimeMillis() - start
                 if (resp.isSuccessful) {
                     return@withContext Result.success(latency)
@@ -117,14 +121,16 @@ class CustomProviderClient {
                         .header("Authorization", "Bearer $apiKey")
                         .post(pingBody.toString().toRequestBody(JSON_MEDIA))
                         .build()
-                    client.newCall(pingReq).execute().use { pingResp ->
+                    client.newCall(pingReq).readReply().let { pingResp ->
                         val pingLat = System.currentTimeMillis() - start
                         if (pingResp.isSuccessful) return@withContext Result.success(pingLat)
-                        return@withContext Result.failure(IOException(friendlyHttpError(pingResp.code, pingResp.body?.string())))
+                        return@withContext Result.failure(IOException(friendlyHttpError(pingResp.code, pingResp.body)))
                     }
                 }
-                Result.failure(IOException(friendlyHttpError(resp.code, resp.body?.string())))
+                Result.failure(IOException(friendlyHttpError(resp.code, resp.body)))
             }
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             Result.failure(IOException("Gagal tersambung ke $base: ${e.localizedMessage ?: "Kesalahan jaringan"}"))
         }
@@ -156,10 +162,10 @@ class CustomProviderClient {
                     .get()
                     .build()
             }
-            client.newCall(req).execute().use { resp ->
-                val raw = resp.body?.string().orEmpty()
+            client.newCall(req).readReply().let { resp ->
+                val raw = resp.body.orEmpty()
                 if (!resp.isSuccessful) {
-                    return@withContext Result.failure(IOException(friendlyHttpError(resp.code, raw)))
+                    return@withContext Result.failure(ProviderHttpException(resp.code, friendlyHttpError(resp.code, raw)))
                 }
                 val json = JSONObject(raw)
                 val ids = mutableListOf<String>()
@@ -182,6 +188,8 @@ class CustomProviderClient {
                 }
                 Result.success(ids.distinct().sorted())
             }
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             Result.failure(IOException("Gagal mengambil daftar model: ${e.localizedMessage ?: "Kesalahan jaringan"}"))
         }
@@ -227,9 +235,9 @@ class CustomProviderClient {
                         .header("x-goog-api-key", apiKey)
                         .post(body.toString().toRequestBody(JSON_MEDIA))
                         .build()
-                    client.newCall(req).execute().use { resp ->
-                        val raw = resp.body?.string().orEmpty()
-                        if (!resp.isSuccessful) return@withContext Result.failure(IOException(friendlyHttpError(resp.code, raw)))
+                    client.newCall(req).readReply().let { resp ->
+                        val raw = resp.body.orEmpty()
+                        if (!resp.isSuccessful) return@withContext Result.failure(ProviderHttpException(resp.code, friendlyHttpError(resp.code, raw)))
                         val json = JSONObject(raw)
                         val text = json.optJSONArray("candidates")
                             ?.optJSONObject(0)
@@ -265,9 +273,9 @@ class CustomProviderClient {
                         .header("anthropic-version", "2023-06-01")
                         .post(body.toString().toRequestBody(JSON_MEDIA))
                         .build()
-                    client.newCall(req).execute().use { resp ->
-                        val raw = resp.body?.string().orEmpty()
-                        if (!resp.isSuccessful) return@withContext Result.failure(IOException(friendlyHttpError(resp.code, raw)))
+                    client.newCall(req).readReply().let { resp ->
+                        val raw = resp.body.orEmpty()
+                        if (!resp.isSuccessful) return@withContext Result.failure(ProviderHttpException(resp.code, friendlyHttpError(resp.code, raw)))
                         val json = JSONObject(raw)
                         val text = json.optJSONArray("content")
                             ?.optJSONObject(0)
@@ -305,9 +313,9 @@ class CustomProviderClient {
                     if (connection.providerType == "openrouter") {
                         reqBuilder.header("X-Title", "AI Notulen Rapat")
                     }
-                    client.newCall(reqBuilder.post(body.toString().toRequestBody(JSON_MEDIA)).build()).execute().use { resp ->
-                        val raw = resp.body?.string().orEmpty()
-                        if (!resp.isSuccessful) return@withContext Result.failure(IOException(friendlyHttpError(resp.code, raw)))
+                    client.newCall(reqBuilder.post(body.toString().toRequestBody(JSON_MEDIA)).build()).readReply().let { resp ->
+                        val raw = resp.body.orEmpty()
+                        if (!resp.isSuccessful) return@withContext Result.failure(ProviderHttpException(resp.code, friendlyHttpError(resp.code, raw)))
                         val json = JSONObject(raw)
                         val text = json.optJSONArray("choices")
                             ?.optJSONObject(0)
@@ -325,6 +333,8 @@ class CustomProviderClient {
                     }
                 }
             }
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             Result.failure(IOException("Gagal memanggil ${connection.name}: ${e.localizedMessage ?: "Timeout atau jaringan error"}"))
         }
@@ -357,9 +367,9 @@ class CustomProviderClient {
                         .header("Authorization", "Token $apiKey")
                         .post(audioBytes.toRequestBody(mimeType.toMediaType()))
                         .build()
-                    client.newCall(req).execute().use { resp ->
-                        val raw = resp.body?.string().orEmpty()
-                        if (!resp.isSuccessful) return@withContext Result.failure(IOException(friendlyHttpError(resp.code, raw)))
+                    client.newCall(req).readReply().let { resp ->
+                        val raw = resp.body.orEmpty()
+                        if (!resp.isSuccessful) return@withContext Result.failure(ProviderHttpException(resp.code, friendlyHttpError(resp.code, raw)))
                         val json = JSONObject(raw)
                         val results = json.optJSONObject("results")
                         val utterances = results?.optJSONArray("utterances")
@@ -373,8 +383,8 @@ class CustomProviderClient {
                                     segments.add(
                                         TranscriptSegment(
                                             pembicara = "Pembicara $spkIdx",
-                                            mulaiDetik = u.optDouble("start", 0.0).toLong(),
-                                            selesaiDetik = u.optDouble("end", 0.0).toLong(),
+                                            mulaiDetik = u.requiredTimestamp("start"),
+                                            selesaiDetik = u.requiredTimestamp("end"),
                                             teks = txt
                                         )
                                     )
@@ -387,7 +397,7 @@ class CustomProviderClient {
                                 ?.optJSONObject(0)
                                 ?.optString("transcript")?.trim().orEmpty()
                             if (altText.isNotBlank()) {
-                                segments.add(TranscriptSegment("Pembicara 1", 0L, 10L, altText))
+                                segments.add(TranscriptSegment("Pembicara 1", 0L, 0L, altText))
                             }
                         }
                         Result.success(ProviderSttResponse(lang, segments, System.currentTimeMillis() - start))
@@ -413,9 +423,9 @@ class CustomProviderClient {
                         .header("x-goog-api-key", apiKey)
                         .post(body.toString().toRequestBody(JSON_MEDIA))
                         .build()
-                    client.newCall(req).execute().use { resp ->
-                        val raw = resp.body?.string().orEmpty()
-                        if (!resp.isSuccessful) return@withContext Result.failure(IOException(friendlyHttpError(resp.code, raw)))
+                    client.newCall(req).readReply().let { resp ->
+                        val raw = resp.body.orEmpty()
+                        if (!resp.isSuccessful) return@withContext Result.failure(ProviderHttpException(resp.code, friendlyHttpError(resp.code, raw)))
                         val root = JSONObject(raw)
                         val textJson = root.optJSONArray("candidates")
                             ?.optJSONObject(0)?.optJSONObject("content")
@@ -431,8 +441,8 @@ class CustomProviderClient {
                                     segments.add(
                                         TranscriptSegment(
                                             pembicara = o.optString("pembicara", "Pembicara 1"),
-                                            mulaiDetik = o.optLong("mulaiDetik", (i * 10).toLong()),
-                                            selesaiDetik = o.optLong("selesaiDetik", ((i + 1) * 10).toLong()),
+                                            mulaiDetik = o.requiredTimestamp("mulaiDetik"),
+                                            selesaiDetik = o.requiredTimestamp("selesaiDetik"),
                                             teks = t
                                         )
                                     )
@@ -464,9 +474,9 @@ class CustomProviderClient {
                         .header("Authorization", "Bearer $apiKey")
                         .post(multipart)
                         .build()
-                    client.newCall(req).execute().use { resp ->
-                        val raw = resp.body?.string().orEmpty()
-                        if (!resp.isSuccessful) return@withContext Result.failure(IOException(friendlyHttpError(resp.code, raw)))
+                    client.newCall(req).readReply().let { resp ->
+                        val raw = resp.body.orEmpty()
+                        if (!resp.isSuccessful) return@withContext Result.failure(ProviderHttpException(resp.code, friendlyHttpError(resp.code, raw)))
                         val json = JSONObject(raw)
                         val segArr = json.optJSONArray("segments")
                         val segments = mutableListOf<TranscriptSegment>()
@@ -478,8 +488,8 @@ class CustomProviderClient {
                                     segments.add(
                                         TranscriptSegment(
                                             pembicara = s.optString("speaker", "Pembicara 1").ifBlank { "Pembicara 1" },
-                                            mulaiDetik = s.optDouble("start", 0.0).toLong(),
-                                            selesaiDetik = s.optDouble("end", 0.0).toLong(),
+                                            mulaiDetik = s.requiredTimestamp("start"),
+                                            selesaiDetik = s.requiredTimestamp("end"),
                                             teks = t
                                         )
                                     )
@@ -488,7 +498,7 @@ class CustomProviderClient {
                         } else {
                             val txt = json.optString("text").trim()
                             if (txt.isNotBlank()) {
-                                segments.add(TranscriptSegment("Pembicara 1", 0L, 10L, txt))
+                                segments.add(TranscriptSegment("Pembicara 1", 0L, 0L, txt))
                             }
                         }
                         Result.success(
@@ -501,6 +511,8 @@ class CustomProviderClient {
                     }
                 }
             }
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             Result.failure(IOException("Gagal transkripsi STT (${connection.name}): ${e.localizedMessage ?: "Kesalahan jaringan"}"))
         }
@@ -535,4 +547,12 @@ class CustomProviderClient {
             return if (start >= 0 && end > start) trimmed.substring(start, end + 1) else "{}"
         }
     }
+}
+
+internal fun JSONObject.requiredTimestamp(key: String): Long {
+    val value = optDouble(key, Double.NaN)
+    require(value.isFinite() && value >= 0 && value < Long.MAX_VALUE.toDouble()) {
+        "Stempel waktu transkripsi tidak valid."
+    }
+    return value.toLong()
 }

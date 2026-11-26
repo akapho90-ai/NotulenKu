@@ -103,6 +103,7 @@ fun RecordScreen(
     onOpenAccountLink: () -> Unit = {},
     onOpenMeetingDetail: (String) -> Unit,
     onDismissProcessing: () -> Unit,
+    processingBusy: Boolean = false,
     currentUserId: String = "",
     pendingLocalJobs: List<LocalProcessingJob> = emptyList(),
     onRetryProcessing: () -> Unit = {},
@@ -258,6 +259,8 @@ fun RecordScreen(
 
             // Active Processing Stepper Card
             if (processingState != null) {
+                val saved = processingState.saveStatus == SaveStatus.SAVED
+                val failed = processingState.error != null || processingState.saveStatus == SaveStatus.FAILED
                 NotulenCard {
                     Column(modifier = Modifier.padding(16.dp)) {
                         Row(
@@ -266,11 +269,15 @@ fun RecordScreen(
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             Text(
-                                text = if (processingState.error != null) "Proses Terhenti" else "Memproses Rapat",
+                                text = when {
+                                    saved -> "Notulen Tersimpan"
+                                    failed -> "Proses Terhenti"
+                                    else -> "Memproses Rapat"
+                                },
                                 style = MaterialTheme.typography.titleMedium,
                                 fontWeight = FontWeight.Bold
                             )
-                            if (processingState.stepIndex == 4 || processingState.error != null) {
+                            if (!processingBusy && (saved || failed)) {
                                 TextButton(onClick = onDismissProcessing) { Text("Tutup") }
                             }
                         }
@@ -281,7 +288,7 @@ fun RecordScreen(
                             horizontalArrangement = Arrangement.SpaceBetween
                         ) {
                             steps.forEachIndexed { i, s ->
-                                val active = processingState.stepIndex >= i + 1
+                                val active = if (i == steps.lastIndex) saved else processingState.stepIndex >= i + 1
                                 Text(
                                     text = s,
                                     style = MaterialTheme.typography.labelSmall,
@@ -291,11 +298,11 @@ fun RecordScreen(
                             }
                         }
                         Spacer(modifier = Modifier.height(6.dp))
-                        val computedProgress = if (processingState.stepIndex == 2 && processingState.totalChunks > 1) {
+                        val computedProgress = if (saved) 1f else if (processingState.stepIndex == 2 && processingState.totalChunks > 1) {
                             val chunkFraction = processingState.completedChunks.toFloat() / processingState.totalChunks.toFloat()
                             (0.25f + chunkFraction * 0.45f).coerceIn(0.25f, 0.7f)
                         } else {
-                            (processingState.stepIndex / 4f).coerceIn(0.1f, 1f)
+                            (processingState.stepIndex / 4f).coerceIn(0.1f, 0.95f)
                         }
                         LinearProgressIndicator(
                             progress = { computedProgress },
@@ -320,6 +327,7 @@ fun RecordScreen(
                                 Spacer(modifier = Modifier.height(8.dp))
                                 TextButton(
                                     onClick = onRetryProcessing,
+                                    enabled = !processingBusy,
                                     modifier = Modifier.testTag("retry_processing_button")
                                 ) {
                                     Icon(Icons.Rounded.Refresh, contentDescription = null, modifier = Modifier.size(16.dp))
@@ -395,6 +403,7 @@ fun RecordScreen(
                                     ) {
                                         Button(
                                             onClick = onRetrySave,
+                                            enabled = !processingBusy,
                                             modifier = Modifier
                                                 .weight(1f)
                                                 .testTag("retry_save_meeting_button")
@@ -413,18 +422,7 @@ fun RecordScreen(
                                         }
                                     }
                                 }
-                                SaveStatus.NONE -> {
-                                    if (processingState.meetingId.isNotBlank()) {
-                                        Button(
-                                            onClick = { onOpenMeetingDetail(processingState.meetingId) },
-                                            modifier = Modifier.fillMaxWidth()
-                                        ) {
-                                            Icon(Icons.Rounded.CheckCircle, contentDescription = null, modifier = Modifier.size(18.dp))
-                                            Spacer(modifier = Modifier.width(6.dp))
-                                            Text("Buka Notulen Rapat")
-                                        }
-                                    }
-                                }
+                                SaveStatus.NONE -> Unit
                             }
                         }
                     }
@@ -513,6 +511,7 @@ fun RecordScreen(
                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                             Button(
                                 onClick = { onResumeLocalJob(job) },
+                                enabled = !processingBusy,
                                 modifier = Modifier.weight(1f)
                             ) {
                                 Text("Lanjutkan Proses")
@@ -775,7 +774,7 @@ fun RecordScreen(
 
             PrimaryGradientButton(
                 text = "Proses Transkrip & Notulen AI",
-                enabled = consentChecked && hasReadyAudio,
+                enabled = consentChecked && hasReadyAudio && !processingBusy,
                 onClick = {
                     if (selectedTab == 0 && recordedAudio != null) {
                         val rec = recordedAudio!!

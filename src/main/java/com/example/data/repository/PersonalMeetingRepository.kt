@@ -1,5 +1,6 @@
 package com.example.data.repository
 
+import com.example.core.readReply
 import android.content.Context
 import android.content.SharedPreferences
 import com.example.BuildConfig
@@ -55,7 +56,8 @@ data class PersonalMeetingSavePayload(
     val actionItems: List<ActionItem> = emptyList(),
     val analysis: MeetingAnalysis? = null,
     val visualData: VisualData? = null,
-    val hasSummary: Boolean = true
+    val hasSummary: Boolean = true,
+    val expectedFirebaseUid: String? = null
 )
 
 class PersonalBackendException(
@@ -153,6 +155,14 @@ class FirebaseCallableMeetingDataSource(
     }
 
     override suspend fun saveMeetingBundle(payload: PersonalMeetingSavePayload): Result<Meeting> {
+        if (payload.expectedFirebaseUid != null && (payload.transcriptText.length > 300_000 ||
+            payload.segments.size > 1_500 || payload.ringkasan.length > 20_000 ||
+            payload.poinUtama.size > 100 || payload.keputusan.size > 100 || payload.risiko.size > 100 ||
+            payload.angkaKunci.size > 50 || payload.actionItems.size > 200)) {
+            return Result.failure(PersonalBackendException(
+                "PAYLOAD_TOO_LARGE", null, "Notulen melebihi kapasitas penyimpanan server. Hasil tetap tersedia di checkpoint lokal."
+            ))
+        }
         val body = JSONObject().apply {
             put("meetingId", payload.meetingId)
             put("judul", payload.judul)
@@ -197,11 +207,19 @@ class FirebaseCallableMeetingDataSource(
                 )
             }
         }
-        return callFunction("savePersonalMeeting", body).map { result ->
-            PersonalMeetingJsonMapper.parseMeeting(
+        return callFunction("savePersonalMeeting", body, payload.expectedFirebaseUid).mapCatching { result ->
+            val saved = PersonalMeetingJsonMapper.parseMeeting(
                 obj = result.getJSONObject("meeting"),
                 fallbackOwnerName = currentOwnerDisplayName()
             )
+            require(saved.id == payload.meetingId) { "Server mengembalikan ID rapat yang berbeda." }
+            if (payload.expectedFirebaseUid != null) {
+                require(saved.status == "done" && saved.transcriptText == payload.transcriptText &&
+                    saved.segments == payload.segments && saved.ringkasan == payload.ringkasan) {
+                    "Server belum mengonfirmasi transkrip dan ringkasan yang lengkap."
+                }
+            }
+            saved
         }
     }
 
@@ -286,10 +304,21 @@ class FirebaseCallableMeetingDataSource(
         }
     }
 
-    private suspend fun callFunction(name: String, data: JSONObject): Result<JSONObject> =
+    private suspend fun callFunction(
+        name: String,
+        data: JSONObject,
+        expectedFirebaseUid: String? = null
+    ): Result<JSONObject> =
         withContext(Dispatchers.IO) {
             try {
-                val idToken = tokenProvider()
+                val idToken = if (expectedFirebaseUid == null) {
+                    tokenProvider()
+                } else {
+                    val user = authProvider()?.currentUser?.takeIf { it.uid == expectedFirebaseUid }
+                        ?: throw PersonalBackendException("UNAUTHENTICATED", null, "Akun telah berubah. Masuk kembali untuk menyimpan rapat ini.")
+                    user.getIdToken(false).await().token
+                        ?: throw PersonalBackendException("UNAUTHENTICATED", null, "Token autentikasi Firebase tidak tersedia.")
+                }
                 val normalizedBase = baseUrl.trimEnd('/')
                 val payload = JSONObject().apply { put("data", data) }.toString()
                 val request = Request.Builder()
@@ -299,8 +328,8 @@ class FirebaseCallableMeetingDataSource(
                     .header("Content-Type", "application/json")
                     .build()
 
-                client.newCall(request).execute().use { response ->
-                    val raw = response.body?.string().orEmpty()
+                client.newCall(request).readReply().let { response ->
+                    val raw = response.body.orEmpty()
                     val json = runCatching { JSONObject(raw) }.getOrNull()
                     if (!response.isSuccessful || json?.has("error") == true) {
                         val errObj = json?.optJSONObject("error")
