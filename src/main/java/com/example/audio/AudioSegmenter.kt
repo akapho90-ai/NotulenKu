@@ -146,20 +146,9 @@ object AudioSegmenter {
         if (!processingSessionId.matches(sessionId)) {
             return Result.failure(IllegalArgumentException("ID pemrosesan audio tidak valid."))
         }
-        val readable = runCatching {
-            val extractor = MediaExtractor()
-            try {
-                extractor.setDataSource(sourceFile.absolutePath)
-                val track = findAudioTrackIndex(extractor)
-                if (track < 0) false else {
-                    extractor.selectTrack(track)
-                    extractor.sampleTrackIndex == track
-                }
-            } finally {
-                extractor.release()
-            }
-        }.getOrDefault(false)
-        if (!readable) return Result.failure(IllegalArgumentException("Berkas audio tidak memuat sampel yang dapat dibaca."))
+        if (!hasReadableAudio(sourceFile)) {
+            return Result.failure(IllegalArgumentException("Berkas audio tidak memuat sampel yang dapat dibaca."))
+        }
         val metadataMs = detectDurationMillis(sourceFile)
         val detectedDurationSec = if (metadataMs > 0) (metadataMs - 1L) / 1_000L + 1L
             else knownDurationSec.coerceAtLeast(1L)
@@ -309,13 +298,13 @@ object AudioSegmenter {
      * into one valid .m4a file using MediaExtractor + MediaMuxer.
      */
     fun mergeM4aSegments(segmentFiles: List<File>, outputFile: File): Result<File> {
-        val validFiles = segmentFiles.filter { it.exists() && it.length() > 256L }
-        if (validFiles.isEmpty()) {
-            return Result.failure(IllegalStateException("Tidak ada segmen rekaman yang valid untuk digabungkan."))
+        if (segmentFiles.isEmpty() || segmentFiles.any { !it.isFile || it.length() == 0L }) {
+            return Result.failure(IllegalStateException("Ada segmen rekaman yang hilang atau kosong."))
         }
-        if (validFiles.size == 1) {
+        if (segmentFiles.size == 1) {
             return runCatching {
-                val single = validFiles.first()
+                val single = segmentFiles.single()
+                check(hasReadableAudio(single)) { "Segmen rekaman tidak memuat sampel audio." }
                 if (single.absolutePath != outputFile.absolutePath) {
                     single.copyTo(outputFile, overwrite = true)
                 }
@@ -327,17 +316,17 @@ object AudioSegmenter {
         val tempMerged = File(outputFile.parentFile, "${outputFile.name}.merging")
         return try {
             val firstExtractor = MediaExtractor()
-            firstExtractor.setDataSource(validFiles.first().absolutePath)
-            val firstTrack = findAudioTrackIndex(firstExtractor)
-            if (firstTrack < 0) {
+            val trackFormat = try {
+                firstExtractor.setDataSource(segmentFiles.first().absolutePath)
+                val firstTrack = findAudioTrackIndex(firstExtractor)
+                check(firstTrack >= 0) { "Segmen pertama tidak memiliki trek audio." }
+                firstExtractor.getTrackFormat(firstTrack)
+            } finally {
                 firstExtractor.release()
-                return Result.failure(IllegalStateException("Segmen rekaman pertama tidak memiliki trek audio valid."))
             }
-            val trackFormat = firstExtractor.getTrackFormat(firstTrack)
             val maxBufSize = runCatching { trackFormat.getInteger(MediaFormat.KEY_MAX_INPUT_SIZE) }
                 .getOrDefault(256 * 1024)
                 .coerceIn(64 * 1024, 1024 * 1024)
-            firstExtractor.release()
 
             if (tempMerged.exists()) tempMerged.delete()
             muxer = MediaMuxer(tempMerged.absolutePath, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
@@ -348,33 +337,38 @@ object AudioSegmenter {
             val info = MediaCodec.BufferInfo()
             var globalPtsOffsetUs = 0L
 
-            for (segFile in validFiles) {
+            for (segFile in segmentFiles) {
                 val extractor = MediaExtractor()
                 try {
                     extractor.setDataSource(segFile.absolutePath)
                     val trackIdx = findAudioTrackIndex(extractor)
-                    if (trackIdx < 0) continue
+                    check(trackIdx >= 0) { "Segmen rekaman tidak memiliki trek audio." }
                     extractor.selectTrack(trackIdx)
 
                     var segBasePtsUs = -1L
                     var lastSegPtsUs = 0L
+                    var wroteSample = false
                     while (true) {
                         info.offset = 0
                         info.size = extractor.readSampleData(buffer, 0)
                         if (info.size < 0) break
+                        if (info.size == 0 || extractor.sampleTime < 0) {
+                            extractor.advance()
+                            continue
+                        }
                         val sampleTimeUs = extractor.sampleTime.coerceAtLeast(0L)
                         if (segBasePtsUs < 0L) segBasePtsUs = sampleTimeUs
                         val relUs = (sampleTimeUs - segBasePtsUs).coerceAtLeast(0L)
                         info.presentationTimeUs = globalPtsOffsetUs + relUs
                         info.flags = extractor.sampleFlags
                         muxer.writeSampleData(muxTrackIdx, buffer, info)
+                        wroteSample = true
                         lastSegPtsUs = relUs
                         extractor.advance()
                     }
+                    check(wroteSample) { "Segmen rekaman tidak memuat sampel audio." }
                     // Add ~64ms AAC frame spacing between segments to keep timestamps strictly monotonic
                     globalPtsOffsetUs += lastSegPtsUs + 64_000L
-                } catch (segErr: Exception) {
-                    Log.w(TAG, "Skipping unreadable segment ${segFile.name} during merge: ${segErr.message}")
                 } finally {
                     runCatching { extractor.release() }
                 }
@@ -384,9 +378,7 @@ object AudioSegmenter {
             muxer.release()
             muxer = null
 
-            if (!tempMerged.exists() || tempMerged.length() <= 256L) {
-                return Result.failure(IllegalStateException("Hasil penggabungan audio kosong."))
-            }
+            check(hasReadableAudio(tempMerged)) { "Hasil penggabungan audio tidak dapat dibaca." }
             if (outputFile.exists()) outputFile.delete()
             if (!tempMerged.renameTo(outputFile)) {
                 tempMerged.copyTo(outputFile, overwrite = true)
@@ -447,4 +439,18 @@ object AudioSegmenter {
         }
         return -1
     }
+
+    private fun hasReadableAudio(file: File): Boolean = runCatching {
+        val extractor = MediaExtractor()
+        try {
+            extractor.setDataSource(file.absolutePath)
+            val track = findAudioTrackIndex(extractor)
+            if (track < 0) false else {
+                extractor.selectTrack(track)
+                extractor.sampleTrackIndex == track
+            }
+        } finally {
+            extractor.release()
+        }
+    }.getOrDefault(false)
 }

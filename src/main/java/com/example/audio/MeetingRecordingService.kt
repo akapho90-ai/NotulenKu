@@ -300,7 +300,7 @@ class MeetingRecordingService : Service() {
         cleanupMonitors()
 
         val finalElapsed = st.elapsedSeconds.coerceAtLeast(1L)
-        val capturedSegments = completedSegmentFiles.filter { it.exists() && it.length() > 256L }
+        val capturedSegments = completedSegmentFiles.toList()
         val activeSessionId = sessionId
 
         serviceScope.launch(Dispatchers.IO) {
@@ -313,10 +313,11 @@ class MeetingRecordingService : Service() {
                     )
                 }
             } else {
-                val outDir = RecordingFileIdentity.masterDirectory(applicationContext)
-                val identity = RecordingFileIdentity.next(applicationContext)
-                val finalFile = File(outDir, identity.fileName)
-                val mergeResult = AudioSegmenter.mergeM4aSegments(capturedSegments, finalFile)
+                val mergeResult = runCatching {
+                    val outDir = RecordingFileIdentity.masterDirectory(applicationContext)
+                    val identity = RecordingFileIdentity.next(applicationContext)
+                    AudioSegmenter.mergeM4aSegments(capturedSegments, File(outDir, identity.fileName)).getOrThrow()
+                }
                 mergeResult.onSuccess { merged ->
                     val detectedDur = AudioSegmenter.detectDurationSeconds(merged).coerceAtLeast(finalElapsed)
                     // Delete raw segment parts ONLY after merged file is confirmed valid
@@ -341,8 +342,9 @@ class MeetingRecordingService : Service() {
                     // NEVER delete segments if merge fails — keep journal intact so recovery can salvage them!
                     Log.e(TAG, "Merge failed on stop; preserving all raw segments for recovery", err)
                     val fallbackSeg = capturedSegments.maxByOrNull { it.length() }
-                    if (fallbackSeg != null && capturedSegments.size == 1) {
-                        val detectedDur = AudioSegmenter.detectDurationSeconds(fallbackSeg).coerceAtLeast(finalElapsed)
+                    val fallbackDuration = fallbackSeg?.let(AudioSegmenter::detectDurationSeconds) ?: 0L
+                    if (fallbackSeg != null && capturedSegments.size == 1 && fallbackDuration > 0L) {
+                        val detectedDur = fallbackDuration.coerceAtLeast(finalElapsed)
                         RecordingStateRepository.deleteSessionJournal(applicationContext, activeSessionId)
                         RecordingStateRepository.update {
                             ActiveRecordingState(
@@ -439,8 +441,8 @@ class MeetingRecordingService : Service() {
             }
             runCatching { mr.release() }
         }
-        if (file != null && file.exists() && file.length() > 512L) {
-            // Check recoverability before accepting; never delete prematurely if non-empty
+        if (mr != null && file != null) {
+            // Keep the expected part so finalization can detect missing or unreadable audio.
             if (!completedSegmentFiles.any { it.absolutePath == file.absolutePath }) {
                 completedSegmentFiles.add(file)
             }

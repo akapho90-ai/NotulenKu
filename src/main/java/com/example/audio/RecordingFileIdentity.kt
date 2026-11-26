@@ -1,7 +1,6 @@
 package com.example.audio
 
 import android.content.Context
-import android.os.Environment
 import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -23,5 +22,7 @@ object RecordingFileIdentity {
         check(prefs.edit().putInt(GLOBAL_KEY, global).putInt(DAILY_KEY, daily).putString(DATE_KEY, date).commit()) { "Gagal menyimpan counter rekaman" }
         return Identity(global, date, daily, fileName)
     }
-    fun masterDirectory(context: Context): File = File(Environment.getExternalStorageDirectory(), "Android/media/NotulenKu/Meet").apply { check(exists() || mkdirs()) { "Tidak dapat membuat folder backup rekaman" } }
+    fun masterDirectory(context: Context): File = File(context.filesDir, "recordings/masters").apply {
+        check(isDirectory || mkdirs()) { "Tidak dapat membuat folder rekaman utama" }
+    }
 }

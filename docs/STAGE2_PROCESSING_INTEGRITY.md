@@ -6,6 +6,7 @@ Branch `stage2-processing-integrity` melanjutkan baseline Stage 1 `bda795b`. Mod
 
 - **Checkpoint.** Penulisan menyinkronkan file sementara dan memvalidasi isinya sebelum pemasangan. Recovery memeriksa identitas dan tahapan job, memuat cadangan saat file utama rusak atau hilang, dan menampilkan job yang hanya memiliki cadangan. Kegagalan checkpoint menghentikan langkah berikutnya. Retry memproses ulang bagian yang gagal dan memakai kembali transkrip atau ringkasan yang sudah tersimpan.
 - **Audio dan transkrip.** MediaExtractor memeriksa sumber audio. Potongan disimpan di cache privat aplikasi, dibatasi ukurannya, dan harus lengkap sampai jendela akhir. Potongan lama di luar cache privat dibuat kembali saat diperlukan. Proses mengabaikan timestamp priming AAC yang negatif saat membangun jendela normal. Normalisasi overlap mempertahankan aksara Unicode dan menghindari penghapusan ucapan di luar tumpang tindih atau dari pembicara berbeda.
+- **File master rekaman.** Emulator API 37 menolak penulisan di folder bersama `Android/media/NotulenKu/Meet`. Rekaman baru disimpan di folder privat persisten `files/recordings/masters`, dengan nama file yang sama seperti sebelumnya. File lama berada di lokasi asalnya. Merge dan recovery mempertahankan daftar bagian yang diharapkan serta menolak hasil jika bagian hilang atau rusak.
 - **AI dan backend.** Permintaan HTTP dapat dibatalkan. Retry teks terbatas pada kegagalan sementara. Provider yang dipilih dan tidak tersedia memunculkan kegagalan. Respons transkripsi atau ringkasan kosong tidak menandai tahap selesai. Simpan ulang menggunakan ID rapat yang sama dan token Firebase dari akun pemilik checkpoint. Aplikasi mempertahankan checkpoint sampai server mengonfirmasi hasil. Penghapusan memilih backend sesuai jenis rapat.
 - **UI.** Tombol pemrosesan menonaktifkan aksi duplikat selama job aktif. Status selesai baru tampil setelah simpan berhasil. Pengguna masih dapat melanjutkan job yang tersimpan setelah membuka ulang aplikasi.
 
@@ -15,7 +16,7 @@ Branch `stage2-processing-integrity` melanjutkan baseline Stage 1 `bda795b`. Mod
 | --- | --- |
 | `gradle testDebugUnitTest` dengan Java 21 | 39 lulus. Mencakup retry chunk, penggunaan ulang transkrip dan ringkasan, checkpoint gagal, isolasi owner, overlap Unicode, respons STT yang tidak valid, dan status Compose. |
 | `gradle assembleDebug assembleDebugAndroidTest` | Lulus menggunakan konfigurasi Firebase dan penandatangan lokal untuk tes. |
-| Instrumentation Android API 37 | 4 lulus. APK terpasang dan `MainActivity` terbuka. Pengujian mencakup WAV sintetis dan audio rusak, potongan AAC 72 detik sampai akhir, dan pemulihan cadangan checkpoint. |
+| Instrumentation Android API 37 | 6 lulus. APK terpasang dan `MainActivity` terbuka. Pengujian mencakup WAV dan AAC sintetis, potongan AAC sampai jendela terakhir, pemulihan cadangan checkpoint, penulisan dan pembacaan master satu atau beberapa bagian, serta penolakan master yang tidak lengkap. |
 | `node --test functions/test/*.test.js` | 10 lulus. Mencakup idempotensi, account linking, isolasi akun, dan routing AI. |
 | `node --test firestore.test.js` pada emulator Firestore 1.22.0 | 5 lulus dengan emulator ber-locale `en_US` dan proyek demo lokal. |
 

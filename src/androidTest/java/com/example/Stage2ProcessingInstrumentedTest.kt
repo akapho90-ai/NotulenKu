@@ -3,6 +3,7 @@ package com.example
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.example.audio.AudioSegmenter
+import com.example.audio.RecordingFileIdentity
 import com.example.data.repository.LocalProcessingCheckpointStore
 import com.example.data.repository.LocalProcessingJob
 import org.junit.Assert.assertEquals
@@ -88,6 +89,49 @@ class Stage2ProcessingInstrumentedTest {
             assertTrue(restarted.listJobs("sample-owner").isEmpty())
         } finally {
             directory.deleteRecursively()
+        }
+    }
+
+    @Test fun recordingMasterCanBeWrittenAndReadForProcessing() {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val context = instrumentation.targetContext
+        val original = File.createTempFile("stage2_master_input_", ".m4a", context.cacheDir)
+        val directory = RecordingFileIdentity.masterDirectory(context)
+        val master = File(directory, "stage2-probe-${System.nanoTime()}.acc")
+        val mergedMaster = File(directory, "stage2-merged-probe-${System.nanoTime()}.acc")
+        try {
+            instrumentation.context.assets.open("synthetic-aac.m4a").use { input ->
+                original.outputStream().use { input.copyTo(it) }
+            }
+            AudioSegmenter.mergeM4aSegments(listOf(original), master).getOrThrow()
+            assertEquals(original.length(), master.length())
+            assertEquals(72L, AudioSegmenter.detectDurationSeconds(master))
+            AudioSegmenter.mergeM4aSegments(listOf(original, master), mergedMaster).getOrThrow()
+            assertTrue(AudioSegmenter.detectDurationSeconds(mergedMaster) >= 143L)
+            assertTrue(AudioSegmenter.prepareAudioChunks(context, "stage2-master-input", master, "audio/mp4", 72).isSuccess)
+        } finally {
+            original.delete()
+            master.delete()
+            mergedMaster.delete()
+        }
+    }
+
+    @Test fun missingOrMalformedRecordingPartsCannotBecomeACompletedMaster() {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val context = instrumentation.targetContext
+        val folder = java.nio.file.Files.createTempDirectory(context.cacheDir.toPath(), "stage2-merge-").toFile()
+        val goodPart = File(folder, "valid.m4a")
+        val corruptPart = File(folder, "corrupt.m4a").apply { writeBytes(ByteArray(1024)) }
+        val output = File(folder, "combined.m4a")
+        try {
+            instrumentation.context.assets.open("synthetic-aac.m4a").use { input ->
+                goodPart.outputStream().use { input.copyTo(it) }
+            }
+            assertTrue(AudioSegmenter.mergeM4aSegments(listOf(goodPart, corruptPart), output).isFailure)
+            assertTrue(AudioSegmenter.mergeM4aSegments(listOf(goodPart, File(folder, "missing.m4a")), output).isFailure)
+            assertTrue(!output.exists() && goodPart.isFile && corruptPart.isFile)
+        } finally {
+            folder.deleteRecursively()
         }
     }
 }

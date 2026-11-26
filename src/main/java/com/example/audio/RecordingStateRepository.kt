@@ -131,25 +131,18 @@ object RecordingStateRepository {
                 val owner = obj.optString("ownerUserId")
                 if (owner != ownerUserId || sessionId == activeId) return@runCatching null
                 val arr = obj.optJSONArray("segmentPaths") ?: JSONArray()
-                val existingSegments = buildList {
+                val expectedSegments = buildList {
                     for (i in 0 until arr.length()) {
                         val p = arr.optString(i)
-                        val segFile = File(p)
-                        if (segFile.exists() && segFile.length() > 256L) {
-                            add(p)
-                        }
+                        if (p.isNotBlank()) add(p)
                     }
                 }
-                if (existingSegments.isEmpty()) {
-                    // Clean empty journal only when no valid audio exists
-                    f.delete()
-                    return@runCatching null
-                }
-                val totalBytes = existingSegments.sumOf { File(it).length() }
+                if (expectedSegments.isEmpty()) return@runCatching null
+                val totalBytes = expectedSegments.sumOf { File(it).length() }
                 RecoverableLocalRecording(
                     sessionId = sessionId,
                     ownerUserId = owner,
-                    segmentPaths = existingSegments,
+                    segmentPaths = expectedSegments,
                     elapsedSeconds = obj.optLong("elapsedSeconds", 1L).coerceAtLeast(1L),
                     createdAtMs = obj.optLong("createdAtMs", f.lastModified()),
                     totalSizeBytes = totalBytes
@@ -166,7 +159,7 @@ object RecordingStateRepository {
         context: Context,
         session: RecoverableLocalRecording
     ): Result<RecordedAudioFile> {
-        val segFiles = session.segmentPaths.map { File(it) }.filter { it.exists() && it.length() > 256L }
+        val segFiles = session.segmentPaths.map(::File)
         if (segFiles.isEmpty()) {
             return Result.failure(IllegalStateException("Berkas segmen rekaman tidak ditemukan."))
         }
