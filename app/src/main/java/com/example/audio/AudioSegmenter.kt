@@ -29,7 +29,7 @@ data class PreparedAudioChunk(
 )
 
 object AudioSegmenter {
-    const val DEFAULT_CHUNK_DURATION_SEC = 600L // 10 minutes (~2.4 MB at 32 kbps AAC)
+    const val DEFAULT_CHUNK_DURATION_SEC = 180L // 10 minutes (~2.4 MB at 32 kbps AAC)
     const val DEFAULT_OVERLAP_SEC = 2L
     const val MAX_DIRECT_UPLOAD_BYTES = 8L * 1024L * 1024L // 8 MB safe threshold under 10 MB backend cap
 
@@ -293,7 +293,8 @@ object AudioSegmenter {
      * into one valid .m4a file using MediaExtractor + MediaMuxer.
      */
     fun mergeM4aSegments(segmentFiles: List<File>, outputFile: File): Result<File> {
-        val validFiles = segmentFiles.filter { it.exists() && it.length() > 256L }
+        val validFiles = segmentFiles.sortedBy { it.name }.filter { it.exists() && it.length() > 512L && detectDurationSeconds(it) > 0L }
+        if (validFiles.size != segmentFiles.size) return Result.failure(IllegalStateException("Merge dibatalkan: ada segmen yang tidak valid atau hilang. Semua segmen harus tervalidasi."))
         if (validFiles.isEmpty()) {
             return Result.failure(IllegalStateException("Tidak ada segmen rekaman yang valid untuk digabungkan."))
         }
@@ -337,7 +338,7 @@ object AudioSegmenter {
                 try {
                     extractor.setDataSource(segFile.absolutePath)
                     val trackIdx = findAudioTrackIndex(extractor)
-                    if (trackIdx < 0) continue
+                    if (trackIdx < 0) throw IllegalStateException("Segmen ${segFile.name} tidak memiliki trek audio.")
                     extractor.selectTrack(trackIdx)
 
                     var segBasePtsUs = -1L
@@ -358,7 +359,7 @@ object AudioSegmenter {
                     // Add ~64ms AAC frame spacing between segments to keep timestamps strictly monotonic
                     globalPtsOffsetUs += lastSegPtsUs + 64_000L
                 } catch (segErr: Exception) {
-                    Log.w(TAG, "Skipping unreadable segment ${segFile.name} during merge: ${segErr.message}")
+                    throw IllegalStateException("Segmen ${segFile.name} gagal diproses; merge tidak boleh parsial.", segErr)
                 } finally {
                     runCatching { extractor.release() }
                 }
