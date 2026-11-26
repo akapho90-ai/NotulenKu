@@ -24,7 +24,7 @@ import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
 import androidx.core.content.ContextCompat
 import com.example.MainActivity
-import com.notulenrapat.android.R
+import com.example.R
 import com.example.export.ExportUtils
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -726,10 +726,10 @@ class MeetingRecordingService : Service() {
     }
 
     companion object {
-        const val ACTION_START = "${com.notulenrapat.android.BuildConfig.APPLICATION_ID}.audio.ACTION_START_RECORDING"
-        const val ACTION_PAUSE = "${com.notulenrapat.android.BuildConfig.APPLICATION_ID}.audio.ACTION_PAUSE_RECORDING"
-        const val ACTION_RESUME = "${com.notulenrapat.android.BuildConfig.APPLICATION_ID}.audio.ACTION_RESUME_RECORDING"
-        const val ACTION_STOP = "${com.notulenrapat.android.BuildConfig.APPLICATION_ID}.audio.ACTION_STOP_RECORDING"
+        const val ACTION_START = "com.example.audio.ACTION_START_RECORDING"
+        const val ACTION_PAUSE = "com.example.audio.ACTION_PAUSE_RECORDING"
+        const val ACTION_RESUME = "com.example.audio.ACTION_RESUME_RECORDING"
+        const val ACTION_STOP = "com.example.audio.ACTION_STOP_RECORDING"
         const val EXTRA_OWNER_UID = "extra_owner_uid"
 
         fun start(context: Context, ownerUserId: String) {

@@ -21,7 +21,7 @@ jobs:
     timeout-minutes: 35
     env:
       FIREBASE_PROJECT_ID: gen-lang-client-0830960267
-      ANDROID_APP_ID: com.notulenrapat.android
+      ANDROID_APP_ID: com.aistudio.notulenrapat.kxmpzq
       SIGNING_SHA1: 20:b5:85:e1:70:90:ec:db:16:0a:8b:8c:27:02:e6:59:ff:99:9c:b2
 
     steps:
@@ -48,12 +48,12 @@ jobs:
       - name: Restore and verify Firebase and signing configuration
         shell: bash
         env:
-          GOOGLE_SERVICES_JSON_BASE64: ${{ secrets.NOTULENKU_ANDROID_GOOGLE_SERVICES_JSON_BASE64 }}
+          GOOGLE_SERVICES_JSON_BASE64: ${{ secrets.GOOGLE_SERVICES_JSON_BASE64 }}
           NOTULENKU_DEBUG_KEYSTORE_BASE64: ${{ secrets.NOTULENKU_DEBUG_KEYSTORE_BASE64 }}
           NOTULENKU_DEBUG_STORE_PASSWORD: ${{ secrets.NOTULENKU_DEBUG_STORE_PASSWORD }}
           NOTULENKU_DEBUG_KEYSTORE_PATH: ${{ runner.temp }}/notulenku-debug.p12
         run: |
-          : "${GOOGLE_SERVICES_JSON_BASE64:?Set NOTULENKU_ANDROID_GOOGLE_SERVICES_JSON_BASE64 for com.notulenrapat.android}"
+          : "${GOOGLE_SERVICES_JSON_BASE64:?Set the GOOGLE_SERVICES_JSON_BASE64 repository secret}"
           : "${NOTULENKU_DEBUG_KEYSTORE_BASE64:?Set the NOTULENKU_DEBUG_KEYSTORE_BASE64 repository secret}"
           : "${NOTULENKU_DEBUG_STORE_PASSWORD:?Set the NOTULENKU_DEBUG_STORE_PASSWORD repository secret}"
 
@@ -81,28 +81,7 @@ jobs:
                     ((.android_info.certificate_hash // "") | gsub(":"; "") | ascii_downcase) == $sha1)
                 )
               ' google-services.json > /dev/null; then
-            if ! jq -e 'type == "object"' google-services.json >/dev/null 2>&1; then
-              echo '::error::The decoded Firebase secret is not a JSON object.'
-            elif ! jq -e --arg project "$FIREBASE_PROJECT_ID" '.project_info.project_id == $project' google-services.json >/dev/null; then
-              echo "::error::Firebase project ID must be $FIREBASE_PROJECT_ID."
-            elif ! jq -e --arg package "$ANDROID_APP_ID" 'any(.client[]?; .client_info.android_client_info.package_name == $package)' google-services.json >/dev/null; then
-              echo "::error::Firebase config has no Android client for $ANDROID_APP_ID."
-            else
-              if ! jq -e --arg package "$ANDROID_APP_ID" '
-                any(.client[]?; .client_info.android_client_info.package_name == $package and
-                  any(.oauth_client[]?; .client_type == 3 and ((.client_id // "") | endswith(".apps.googleusercontent.com"))))
-              ' google-services.json >/dev/null; then
-                echo "::error::Firebase config has no Web OAuth client for $ANDROID_APP_ID."
-              fi
-              if ! jq -e --arg package "$ANDROID_APP_ID" --arg sha1 "${certificate_sha1//:/}" '
-                any(.client[]?; .client_info.android_client_info.package_name == $package and
-                  any(.oauth_client[]?; .client_type == 1 and .android_info.package_name == $package and
-                    ((.android_info.certificate_hash // "") | gsub(":"; "") | ascii_downcase) == $sha1))
-              ' google-services.json >/dev/null; then
-                echo "::error::Firebase config has no Android OAuth client for $ANDROID_APP_ID with the CI signing SHA-1."
-              fi
-              echo '::error::A single Firebase Android client must satisfy both OAuth checks.'
-            fi
+            echo '::error::Firebase config must match the project, package, Web OAuth client, and registered debug SHA-1.'
             exit 1
           fi
 

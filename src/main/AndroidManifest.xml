@@ -19,7 +19,7 @@
         android:supportsRtl="true"
         android:theme="@style/Theme.MyApplication">
         <activity
-            android:name="com.example.MainActivity"
+            android:name=".MainActivity"
             android:exported="true"
             android:label="@string/app_name"
             android:theme="@style/Theme.MyApplication"
@@ -32,7 +32,7 @@
         </activity>
 
         <service
-            android:name="com.example.audio.MeetingRecordingService"
+            android:name=".audio.MeetingRecordingService"
             android:exported="false"
             android:foregroundServiceType="microphone" />
 

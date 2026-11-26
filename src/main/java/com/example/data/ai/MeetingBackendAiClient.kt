@@ -2,7 +2,7 @@ package com.example.data.ai
 
 import com.example.core.readReply
 import android.util.Base64
-import com.notulenrapat.android.BuildConfig
+import com.example.BuildConfig
 import com.example.core.AppConstants
 import com.google.firebase.Firebase
 import com.google.firebase.auth.FirebaseAuth

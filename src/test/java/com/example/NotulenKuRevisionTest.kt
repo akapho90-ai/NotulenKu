@@ -1,7 +1,5 @@
 package com.example
 
-import com.notulenrapat.android.R
-
 import android.content.Context
 import androidx.credentials.exceptions.GetCredentialCancellationException
 import androidx.credentials.exceptions.NoCredentialException

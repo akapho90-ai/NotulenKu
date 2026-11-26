@@ -62,7 +62,7 @@ import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import com.notulenrapat.android.R
+import com.example.R
 import com.example.data.ai.PeriodicSummaryResult
 import com.example.data.model.AiConnection
 import com.example.data.model.AuditLog

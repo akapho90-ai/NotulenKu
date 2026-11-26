@@ -6,7 +6,7 @@ import androidx.compose.ui.text.font.Font
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.sp
-import com.notulenrapat.android.R
+import com.example.R
 
 val PlusJakartaDisplay = FontFamily(
     Font(R.font.plus_jakarta_sans, FontWeight.Normal),

@@ -1,7 +1,5 @@
 package com.example
 
-import com.notulenrapat.android.R
-
 import android.content.Context
 import androidx.test.core.app.ApplicationProvider
 import org.junit.Assert.assertEquals

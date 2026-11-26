@@ -71,7 +71,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import com.notulenrapat.android.R
+import com.example.R
 import com.example.audio.AudioFileHelper
 import com.example.audio.ImportedAudioInfo
 import com.example.audio.MeetingRecordingService
