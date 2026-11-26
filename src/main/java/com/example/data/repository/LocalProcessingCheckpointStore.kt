@@ -9,6 +9,7 @@ import com.example.data.model.TranscriptSegment
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
+import java.io.FileOutputStream
 
 private const val TAG = "LocalCheckpointStore"
 
@@ -100,26 +101,53 @@ class LocalProcessingCheckpointStore(private val baseDir: File) {
         return File(userDir(ownerUserId), "job_$safeId.json")
     }
 
-    fun saveJob(job: LocalProcessingJob) {
-        if (job.ownerUserId.isBlank() || job.meetingId.isBlank()) return
-        runCatching {
+    /** Durable checkpoint write; returns false if installation or verification fails. */
+    fun saveJob(job: LocalProcessingJob): Boolean {
+        if (job.ownerUserId.isBlank() || job.meetingId.isBlank()) return false
+        return runCatching {
+            val dir = userDir(job.ownerUserId)
             val file = jobFile(job.ownerUserId, job.meetingId)
-            val tmp = File(file.parentFile, "${file.name}.tmp")
-            tmp.writeText(serializeJob(job).toString())
-            if (!tmp.renameTo(file)) {
-                tmp.copyTo(file, overwrite = true)
-                tmp.delete()
+            val tmp = File(dir, "${file.name}.tmp")
+            val backup = File(dir, "${file.name}.bak")
+            val serialized = serializeJob(job).toString()
+            FileOutputStream(tmp).use { stream ->
+                stream.write(serialized.toByteArray(Charsets.UTF_8))
+                stream.flush()
+                stream.fd.sync()
             }
+            if (file.exists()) {
+                if (backup.exists()) backup.delete()
+                if (!file.renameTo(backup)) {
+                    tmp.delete()
+                    throw IllegalStateException("Tidak dapat membuat backup checkpoint")
+                }
+            }
+            if (!tmp.renameTo(file)) {
+                if (backup.exists()) backup.renameTo(file)
+                throw IllegalStateException("Tidak dapat memasang checkpoint baru")
+            }
+            val verified = runCatching { JSONObject(file.readText()).getString("meetingId") == job.meetingId }.getOrDefault(false)
+            if (!verified) {
+                file.delete()
+                if (backup.exists()) backup.renameTo(file)
+                throw IllegalStateException("Verifikasi checkpoint gagal")
+            }
+            backup.delete()
+            true
         }.onFailure {
-            Log.w(TAG, "Failed saving processing checkpoint ${job.meetingId}: ${it.message}")
-        }
+            Log.e(TAG, "Failed saving processing checkpoint ${job.meetingId}", it)
+        }.getOrDefault(false)
     }
 
     fun loadJob(ownerUserId: String, meetingId: String): LocalProcessingJob? {
         if (ownerUserId.isBlank() || meetingId.isBlank()) return null
         val file = jobFile(ownerUserId, meetingId)
         if (!file.exists()) return null
-        return runCatching { deserializeJob(JSONObject(file.readText())) }.getOrNull()
+        return runCatching {
+            deserializeJob(JSONObject(file.readText())).takeIf {
+                it.ownerUserId == ownerUserId && it.meetingId == meetingId
+            }
+        }.getOrNull()
     }
 
     fun listJobs(ownerUserId: String): List<LocalProcessingJob> {
@@ -127,7 +155,9 @@ class LocalProcessingCheckpointStore(private val baseDir: File) {
         val dir = userDir(ownerUserId)
         val files = dir.listFiles { f -> f.isFile && f.name.endsWith(".json") } ?: return emptyList()
         return files.mapNotNull { f ->
-            runCatching { deserializeJob(JSONObject(f.readText())) }.getOrNull()
+            runCatching { deserializeJob(JSONObject(f.readText())) }
+                .getOrNull()
+                ?.takeIf { it.ownerUserId == ownerUserId && it.meetingId.isNotBlank() }
         }.sortedByDescending { it.createdAtMs }
     }
 
