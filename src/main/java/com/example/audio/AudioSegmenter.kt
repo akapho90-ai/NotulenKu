@@ -361,7 +361,7 @@ object AudioSegmenter {
         }
     }
 
-    fun cleanupTempChunkDir(context: Context, sessionId: String) {
+    fun cleanupExpiredChunks(context: Context, nowMs: Long = System.currentTimeMillis(), retentionMs: Long = 72L * 60L * 60L * 1000L) {\n        val root = File(android.os.Environment.getExternalStorageDirectory(), "Android/media/NotulenKu/chunk")\n        root.listFiles()?.filter { it.isDirectory && nowMs - it.lastModified() > retentionMs }?.forEach { runCatching { it.deleteRecursively() } }\n    }\n\n    fun cleanupTempChunkDir(context: Context, sessionId: String) {
         if (sessionId.isBlank()) return
         val dir = File(android.os.Environment.getExternalStorageDirectory(), "Android/media/NotulenKu/chunk/$sessionId")
         if (dir.exists()) {
