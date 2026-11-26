@@ -81,7 +81,28 @@ jobs:
                     ((.android_info.certificate_hash // "") | gsub(":"; "") | ascii_downcase) == $sha1)
                 )
               ' google-services.json > /dev/null; then
-            echo '::error::The Firebase config must contain the registered com.notulenrapat.android app, Web OAuth client and matching debug SHA-1. Update NOTULENKU_ANDROID_GOOGLE_SERVICES_JSON_BASE64 for the new Android app.'
+            if ! jq -e 'type == "object"' google-services.json >/dev/null 2>&1; then
+              echo '::error::The decoded Firebase secret is not a JSON object.'
+            elif ! jq -e --arg project "$FIREBASE_PROJECT_ID" '.project_info.project_id == $project' google-services.json >/dev/null; then
+              echo "::error::Firebase project ID must be $FIREBASE_PROJECT_ID."
+            elif ! jq -e --arg package "$ANDROID_APP_ID" 'any(.client[]?; .client_info.android_client_info.package_name == $package)' google-services.json >/dev/null; then
+              echo "::error::Firebase config has no Android client for $ANDROID_APP_ID."
+            else
+              if ! jq -e --arg package "$ANDROID_APP_ID" '
+                any(.client[]?; .client_info.android_client_info.package_name == $package and
+                  any(.oauth_client[]?; .client_type == 3 and ((.client_id // "") | endswith(".apps.googleusercontent.com"))))
+              ' google-services.json >/dev/null; then
+                echo "::error::Firebase config has no Web OAuth client for $ANDROID_APP_ID."
+              fi
+              if ! jq -e --arg package "$ANDROID_APP_ID" --arg sha1 "${certificate_sha1//:/}" '
+                any(.client[]?; .client_info.android_client_info.package_name == $package and
+                  any(.oauth_client[]?; .client_type == 1 and .android_info.package_name == $package and
+                    ((.android_info.certificate_hash // "") | gsub(":"; "") | ascii_downcase) == $sha1))
+              ' google-services.json >/dev/null; then
+                echo "::error::Firebase config has no Android OAuth client for $ANDROID_APP_ID with the CI signing SHA-1."
+              fi
+              echo '::error::A single Firebase Android client must satisfy both OAuth checks.'
+            fi
             exit 1
           fi
 
