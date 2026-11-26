@@ -1304,10 +1304,21 @@ class MeetingViewModel(
         _uiMessage.value = null
     }
 
-    private fun persistJob(job: LocalProcessingJob) {
+    private fun persistJob(job: LocalProcessingJob): Boolean {
         activeJob = job
-        checkpointStore?.saveJob(job)
+        val store = checkpointStore
+        // Jobs without a checkpoint store cannot be considered durable; expose that limitation.
+        val saved = store?.saveJob(job) ?: false
         refreshPendingLocalJobs()
+        if (!saved) {
+            val message = "Checkpoint lokal gagal disimpan. Proses dihentikan agar kemajuan tidak hilang; rekaman asli tetap dipertahankan."
+            _uiMessage.value = message
+            val current = _processingState.value
+            if (current?.meetingId == job.meetingId) {
+                _processingState.value = current.copy(error = message, stageDetail = "Penyimpanan checkpoint gagal", canRetryProcessing = true)
+            }
+        }
+        return saved
     }
 
     private fun hydrateLocalAudioPath(meeting: Meeting): Meeting {
