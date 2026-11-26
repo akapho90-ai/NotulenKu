@@ -29,7 +29,7 @@ data class PreparedAudioChunk(
 )
 
 object AudioSegmenter {
-    const val DEFAULT_CHUNK_DURATION_SEC = 180L // 3-minute chunks for resilient STT
+    const val DEFAULT_CHUNK_DURATION_SEC = 180L // 3-minute STT chunks
     const val DEFAULT_OVERLAP_SEC = 2L
     const val MAX_DIRECT_UPLOAD_BYTES = 8L * 1024L * 1024L // 8 MB safe threshold under 10 MB backend cap
 
@@ -173,7 +173,9 @@ object AudioSegmenter {
             )
         }
 
-        val chunkRoot = File(android.os.Environment.getExternalStorageDirectory(), "Android/media/NotulenKu/chunk")\n        val chunkDir = File(chunkRoot, sessionId).apply { mkdirs() }
+        val chunkRoot = File(android.os.Environment.getExternalStorageDirectory(), "Android/media/NotulenKu/chunk")
+        cleanupExpiredChunks(chunkRoot, sessionId)
+        val chunkDir = File(chunkRoot, sessionId).apply { mkdirs() }
         // Adjust chunk duration downward if bitrate is high so each chunk stays safely under 8 MB
         val bytesPerSec = (sourceFile.length().toDouble() / detectedDurationSec.toDouble()).coerceAtLeast(1000.0)
         val sizeSafeChunkSec = ((MAX_DIRECT_UPLOAD_BYTES * 0.75) / bytesPerSec).toLong().coerceIn(60L, chunkDurationSec)
@@ -293,59 +295,96 @@ object AudioSegmenter {
      * into one valid .m4a file using MediaExtractor + MediaMuxer.
      */
     fun mergeM4aSegments(segmentFiles: List<File>, outputFile: File): Result<File> {
-        if (segmentFiles.isEmpty()) return Result.failure(IllegalStateException("Tidak ada segmen rekaman."))
-        val missing = segmentFiles.filter { !it.exists() || it.length() <= 256L }
-        if (missing.isNotEmpty()) return Result.failure(IllegalStateException("Segmen rekaman hilang atau rusak: ${missing.joinToString { it.name }}"))
-        val validFiles = segmentFiles
-        val tempMerged = File(outputFile.parentFile, "${outputFile.name}.merging")
-        runCatching { tempMerged.delete() }
-        if (validFiles.size == 1) return runCatching {
-            if (validFiles.first().absolutePath != outputFile.absolutePath) {
-                validFiles.first().copyTo(tempMerged, overwrite = true)
-                if (!tempMerged.renameTo(outputFile)) { tempMerged.copyTo(outputFile, overwrite = true); tempMerged.delete() }
-            }
-            outputFile
+        val validFiles = segmentFiles.filter { it.exists() && it.length() > 256L }
+        if (validFiles.isEmpty()) {
+            return Result.failure(IllegalStateException("Tidak ada segmen rekaman yang valid untuk digabungkan."))
         }
-        var muxer: MediaMuxer? = null
-        var expectedDurationUs = 0L
-        return try {
-            val first = MediaExtractor().apply { setDataSource(validFiles.first().absolutePath) }
-            val firstTrack = findAudioTrackIndex(first)
-            if (firstTrack < 0) { first.release(); throw IllegalStateException("Segmen pertama tidak memiliki trek audio.") }
-            val trackFormat = first.getTrackFormat(firstTrack)
-            val maxBufSize = runCatching { trackFormat.getInteger(MediaFormat.KEY_MAX_INPUT_SIZE) }.getOrDefault(256*1024).coerceIn(64*1024,1024*1024)
-            first.release()
-            muxer = MediaMuxer(tempMerged.absolutePath, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
-            val muxTrackIdx = muxer.addTrack(trackFormat); muxer.start()
-            val buffer = ByteBuffer.allocate(maxBufSize); val info = MediaCodec.BufferInfo()
-            var offsetUs = 0L; var mergedCount = 0
-            for (file in validFiles) {
-                val ex = MediaExtractor()
-                try {
-                    ex.setDataSource(file.absolutePath)
-                    val track = findAudioTrackIndex(ex)
-                    if (track < 0) throw IllegalStateException("Trek audio tidak ditemukan: ${file.name}")
-                    if (ex.getTrackFormat(track).getString(MediaFormat.KEY_MIME) != trackFormat.getString(MediaFormat.KEY_MIME)) throw IllegalStateException("Codec berbeda: ${file.name}")
-                    ex.selectTrack(track); var base=-1L; var last=0L; var samples=0
-                    while(true) {
-                        info.offset=0; info.size=ex.readSampleData(buffer,0); if(info.size<0) break
-                        val pts=ex.sampleTime.coerceAtLeast(0L); if(base<0) base=pts
-                        val rel=(pts-base).coerceAtLeast(0L); info.presentationTimeUs=offsetUs+rel; info.flags=ex.sampleFlags
-                        muxer.writeSampleData(muxTrackIdx,buffer,info); last=rel; samples++; ex.advance()
-                    }
-                    if(samples==0) throw IllegalStateException("Segmen kosong: ${file.name}")
-                    offsetUs+=last+64_000L; expectedDurationUs+=last; mergedCount++
-                } finally { ex.release() }
+        if (validFiles.size == 1) {
+            return runCatching {
+                val single = validFiles.first()
+                if (single.absolutePath != outputFile.absolutePath) {
+                    single.copyTo(outputFile, overwrite = true)
+                }
+                outputFile
             }
-            if(mergedCount!=validFiles.size) throw IllegalStateException("Tidak semua segmen ter-merge.")
-            muxer.stop(); muxer.release(); muxer=null
-            if(!tempMerged.exists()||tempMerged.length()<=256L) throw IllegalStateException("Hasil merge kosong.")
-            val dur=detectDurationSeconds(tempMerged)
-            if(dur<=0L || (expectedDurationUs>0 && dur<expectedDurationUs/1_000_000L*0.5)) throw IllegalStateException("Validasi durasi merge gagal.")
-            if(outputFile.exists()) outputFile.delete()
-            if(!tempMerged.renameTo(outputFile)){tempMerged.copyTo(outputFile,overwrite=true);tempMerged.delete()}
+        }
+
+        var muxer: MediaMuxer? = null
+        val tempMerged = File(outputFile.parentFile, "${outputFile.name}.merging")
+        return try {
+            val firstExtractor = MediaExtractor()
+            firstExtractor.setDataSource(validFiles.first().absolutePath)
+            val firstTrack = findAudioTrackIndex(firstExtractor)
+            if (firstTrack < 0) {
+                firstExtractor.release()
+                return Result.failure(IllegalStateException("Segmen rekaman pertama tidak memiliki trek audio valid."))
+            }
+            val trackFormat = firstExtractor.getTrackFormat(firstTrack)
+            val maxBufSize = runCatching { trackFormat.getInteger(MediaFormat.KEY_MAX_INPUT_SIZE) }
+                .getOrDefault(256 * 1024)
+                .coerceIn(64 * 1024, 1024 * 1024)
+            firstExtractor.release()
+
+            if (tempMerged.exists()) tempMerged.delete()
+            muxer = MediaMuxer(tempMerged.absolutePath, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
+            val muxTrackIdx = muxer.addTrack(trackFormat)
+            muxer.start()
+
+            val buffer = ByteBuffer.allocate(maxBufSize)
+            val info = MediaCodec.BufferInfo()
+            var globalPtsOffsetUs = 0L
+
+            for (segFile in validFiles) {
+                val extractor = MediaExtractor()
+                try {
+                    extractor.setDataSource(segFile.absolutePath)
+                    val trackIdx = findAudioTrackIndex(extractor)
+                    if (trackIdx < 0) continue
+                    extractor.selectTrack(trackIdx)
+
+                    var segBasePtsUs = -1L
+                    var lastSegPtsUs = 0L
+                    while (true) {
+                        info.offset = 0
+                        info.size = extractor.readSampleData(buffer, 0)
+                        if (info.size < 0) break
+                        val sampleTimeUs = extractor.sampleTime.coerceAtLeast(0L)
+                        if (segBasePtsUs < 0L) segBasePtsUs = sampleTimeUs
+                        val relUs = (sampleTimeUs - segBasePtsUs).coerceAtLeast(0L)
+                        info.presentationTimeUs = globalPtsOffsetUs + relUs
+                        info.flags = extractor.sampleFlags
+                        muxer.writeSampleData(muxTrackIdx, buffer, info)
+                        lastSegPtsUs = relUs
+                        extractor.advance()
+                    }
+                    // Add ~64ms AAC frame spacing between segments to keep timestamps strictly monotonic
+                    globalPtsOffsetUs += lastSegPtsUs + 64_000L
+                } catch (segErr: Exception) {
+                    Log.w(TAG, "Skipping unreadable segment ${segFile.name} during merge: ${segErr.message}")
+                } finally {
+                    runCatching { extractor.release() }
+                }
+            }
+
+            muxer.stop()
+            muxer.release()
+            muxer = null
+
+            if (!tempMerged.exists() || tempMerged.length() <= 256L) {
+                return Result.failure(IllegalStateException("Hasil penggabungan audio kosong."))
+            }
+            if (outputFile.exists()) outputFile.delete()
+            if (!tempMerged.renameTo(outputFile)) {
+                tempMerged.copyTo(outputFile, overwrite = true)
+                tempMerged.delete()
+            }
             Result.success(outputFile)
-        } catch(e:Exception) { runCatching{muxer?.release()};runCatching{tempMerged.delete()};Result.failure(IllegalStateException("Merge audio gagal: ${e.localizedMessage}",e)) }
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed merging recording segments", e)
+            runCatching { muxer?.release() }
+            runCatching { if (tempMerged.exists()) tempMerged.delete() }
+            Result.failure(e)
+        }
     }
 
     fun detectDurationSeconds(file: File): Long {
@@ -361,12 +400,23 @@ object AudioSegmenter {
         }
     }
 
+    private const val CHUNK_RETENTION_MS = 72L * 60L * 60L * 1000L
+
+    fun cleanupExpiredChunks(root: File, activeSessionId: String? = null, nowMs: Long = System.currentTimeMillis()): Int {
+        if (!root.exists()) return 0
+        var removed = 0
+        root.listFiles()?.filter { it.isDirectory && it.name != activeSessionId }?.forEach { dir ->
+            val touched = dir.lastModified().takeIf { it > 0L } ?: nowMs
+            if (nowMs - touched >= CHUNK_RETENTION_MS && runCatching { dir.deleteRecursively() }.getOrDefault(false)) removed++
+        }
+        return removed
+    }
+
     fun cleanupTempChunkDir(context: Context, sessionId: String) {
         if (sessionId.isBlank()) return
-        val dir = File(android.os.Environment.getExternalStorageDirectory(), "Android/media/NotulenKu/chunk/$sessionId")
-        if (dir.exists()) {
-            runCatching { dir.deleteRecursively() }
-        }
+        val root = File(android.os.Environment.getExternalStorageDirectory(), "Android/media/NotulenKu/chunk")
+        val dir = File(root, sessionId)
+        if (dir.exists()) runCatching { dir.deleteRecursively() }
     }
 
     private fun findAudioTrackIndex(extractor: MediaExtractor): Int {

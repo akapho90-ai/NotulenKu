@@ -1,0 +1,120 @@
+name: Build NotulenKu Debug APK
+
+on:
+  push:
+    branches: [main, stage2-processing-integrity]
+    paths:
+      - 'src/**'
+      - 'gradle/**'
+      - '*.gradle.kts'
+      - 'gradle.properties'
+      - '.env.example'
+      - '.github/workflows/debug-apk.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    env:
+      FIREBASE_PROJECT_ID: gen-lang-client-0830960267
+      ANDROID_APP_ID: com.aistudio.notulenrapat.kxmpzq
+      SIGNING_SHA1: 20:b5:85:e1:70:90:ec:db:16:0a:8b:8c:27:02:e6:59:ff:99:9c:b2
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      # Robolectric needs Java 21 for Android API 36.
+      - name: Set up Java 21
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Set up Gradle 9.3.1
+        uses: gradle/actions/setup-gradle@v6
+        with:
+          gradle-version: '9.3.1'
+
+      - name: Install Android SDK and build tools
+        run: '"$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install "platforms;android-36.1" "build-tools;36.0.0"'
+
+      - name: Restore and verify Firebase and signing configuration
+        shell: bash
+        env:
+          GOOGLE_SERVICES_JSON_BASE64: ${{ secrets.GOOGLE_SERVICES_JSON_BASE64 }}
+          NOTULENKU_DEBUG_KEYSTORE_BASE64: ${{ secrets.NOTULENKU_DEBUG_KEYSTORE_BASE64 }}
+          NOTULENKU_DEBUG_STORE_PASSWORD: ${{ secrets.NOTULENKU_DEBUG_STORE_PASSWORD }}
+          NOTULENKU_DEBUG_KEYSTORE_PATH: ${{ runner.temp }}/notulenku-debug.p12
+        run: |
+          : "${GOOGLE_SERVICES_JSON_BASE64:?Set the GOOGLE_SERVICES_JSON_BASE64 repository secret}"
+          : "${NOTULENKU_DEBUG_KEYSTORE_BASE64:?Set the NOTULENKU_DEBUG_KEYSTORE_BASE64 repository secret}"
+          : "${NOTULENKU_DEBUG_STORE_PASSWORD:?Set the NOTULENKU_DEBUG_STORE_PASSWORD repository secret}"
+
+          umask 077
+          printf '%s' "$GOOGLE_SERVICES_JSON_BASE64" | base64 --decode > google-services.json
+          printf '%s' "$NOTULENKU_DEBUG_KEYSTORE_BASE64" | base64 --decode > "$NOTULENKU_DEBUG_KEYSTORE_PATH"
+
+          certificate_sha1=$(keytool -J-Duser.language=en -list -v -storetype PKCS12 \
+            -keystore "$NOTULENKU_DEBUG_KEYSTORE_PATH" -alias androiddebugkey \
+            -storepass:env NOTULENKU_DEBUG_STORE_PASSWORD |
+            awk '$1 == "SHA1:" { print tolower($2) }')
+          if [[ "$certificate_sha1" != "$SIGNING_SHA1" ]]; then
+            echo '::error::The debug keystore does not match the registered NotulenKu SHA-1.'
+            exit 1
+          fi
+
+          if ! jq -e --arg project "$FIREBASE_PROJECT_ID" --arg package "$ANDROID_APP_ID" \
+              --arg sha1 "${certificate_sha1//:/}" '
+                .project_info.project_id == $project and any(.client[]?;
+                  .client_info.android_client_info.package_name == $package and
+                  any(.oauth_client[]?; .client_type == 3 and
+                    ((.client_id // "") | endswith(".apps.googleusercontent.com"))) and
+                  any(.oauth_client[]?; .client_type == 1 and
+                    .android_info.package_name == $package and
+                    ((.android_info.certificate_hash // "") | gsub(":"; "") | ascii_downcase) == $sha1)
+                )
+              ' google-services.json > /dev/null; then
+            echo '::error::Firebase config must match the project, package, Web OAuth client, and registered debug SHA-1.'
+            exit 1
+          fi
+
+      - name: Run unit and Robolectric regression tests
+        env:
+          JAVA_TOOL_OPTIONS: -Drobolectric.dependency.repo.url=https://repo.maven.apache.org/maven2
+        run: gradle testDebugUnitTest --no-daemon --no-configuration-cache --stacktrace
+
+      - name: Build signed debug APK
+        env:
+          NOTULENKU_DEBUG_STORE_PASSWORD: ${{ secrets.NOTULENKU_DEBUG_STORE_PASSWORD }}
+          NOTULENKU_DEBUG_KEYSTORE_PATH: ${{ runner.temp }}/notulenku-debug.p12
+        run: gradle assembleDebug --no-daemon --no-configuration-cache --stacktrace
+
+      - name: Verify APK certificate
+        shell: bash
+        run: |
+          shopt -s nullglob
+          apks=(build/outputs/apk/debug/*.apk)
+          [[ ${#apks[@]} -eq 1 ]]
+          apk="${apks[0]}"
+          signer="$ANDROID_HOME/build-tools/36.0.0/apksigner"
+          certificate_sha1=$("$signer" verify --print-certs "$apk" |
+            awk -F': ' '/^Signer #1 certificate SHA-1 digest:/ { print tolower($2) }')
+          if [[ "${certificate_sha1//:/}" != "${SIGNING_SHA1//:/}" ]]; then
+            echo '::error::The APK signature does not match the registered NotulenKu SHA-1.'
+            exit 1
+          fi
+
+      - name: Upload NotulenKu debug APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: NotulenKu-debug-apk
+          path: build/outputs/apk/debug/*.apk
+          if-no-files-found: error
+          retention-days: 14
