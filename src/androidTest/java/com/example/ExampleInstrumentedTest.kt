@@ -17,6 +17,8 @@ class ExampleInstrumentedTest {
   fun useAppContext() {
     // Context of the app under test.
     val appContext = InstrumentationRegistry.getInstrumentation().targetContext
-    assertEquals(BuildConfig.APPLICATION_ID, appContext.packageName)
+    assertEquals("com.notulenrapat.android", appContext.packageName)
+    assertEquals("com.example.MainActivity", appContext.packageManager.getLaunchIntentForPackage(appContext.packageName)?.component?.className)
+    assertNotNull(appContext.packageManager.resolveContentProvider("${appContext.packageName}.fileprovider", 0))
   }
 }

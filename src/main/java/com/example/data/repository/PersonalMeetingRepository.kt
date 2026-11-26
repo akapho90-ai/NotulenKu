@@ -3,7 +3,7 @@ package com.example.data.repository
 import com.example.core.readReply
 import android.content.Context
 import android.content.SharedPreferences
-import com.example.BuildConfig
+import com.notulenrapat.android.BuildConfig
 import com.example.core.AppConstants
 import com.example.data.model.ActionItem
 import com.example.data.model.KeyNumber

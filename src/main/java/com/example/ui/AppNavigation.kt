@@ -71,7 +71,7 @@ import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
-import com.example.R
+import com.notulenrapat.android.R
 import com.example.core.AppConstants
 import com.example.data.auth.resolveGoogleWebClientId
 import com.example.data.ai.AiService

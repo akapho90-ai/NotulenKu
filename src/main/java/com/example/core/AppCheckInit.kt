@@ -3,7 +3,7 @@ package com.example.core
 import android.content.Context
 import android.content.Intent
 import android.util.Log
-import com.example.BuildConfig
+import com.notulenrapat.android.BuildConfig
 import com.google.firebase.FirebaseApp
 import com.google.firebase.appcheck.FirebaseAppCheck
 import com.google.firebase.appcheck.recaptcha.RecaptchaAppCheckProviderFactory

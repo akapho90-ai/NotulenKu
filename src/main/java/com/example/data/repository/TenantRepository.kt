@@ -2,7 +2,7 @@ package com.example.data.repository
 
 import android.content.Context
 import android.util.Log
-import com.example.R
+import com.notulenrapat.android.R
 import com.example.core.AppConstants
 import com.example.core.OperationType
 import com.example.core.handleFirestoreError

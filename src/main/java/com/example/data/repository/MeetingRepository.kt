@@ -1,7 +1,7 @@
 package com.example.data.repository
 
 import android.content.Context
-import com.example.R
+import com.notulenrapat.android.R
 import com.example.core.OperationType
 import com.example.core.handleFirestoreError
 import com.example.data.model.ActionItem

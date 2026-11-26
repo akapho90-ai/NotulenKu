@@ -77,7 +77,7 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import com.example.R
+import com.notulenrapat.android.R
 import com.example.data.model.Meeting
 import com.example.data.model.Tenant
 import com.example.data.model.UsageLog

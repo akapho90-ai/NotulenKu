@@ -4,12 +4,22 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.example.audio.AudioSegmenter
 import com.example.audio.RecordingFileIdentity
+import com.example.data.ai.AiService
+import com.example.data.ai.MeetingBackendAiClient
 import com.example.data.repository.LocalProcessingCheckpointStore
 import com.example.data.repository.LocalProcessingJob
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
+import kotlinx.coroutines.runBlocking
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.OkHttpClient
+import okhttp3.Protocol
+import okhttp3.Response
+import okhttp3.ResponseBody.Companion.toResponseBody
+import okio.Buffer
+import org.json.JSONObject
 import java.io.File
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
@@ -40,22 +50,23 @@ class Stage2ProcessingInstrumentedTest {
         }
     }
 
-    @Test fun longAacProducesPlayableChunksThroughTheFinalWindow() {
+    @Test fun defaultThreeMinuteChunksReachSttAndCanBeRebuiltWithoutDeletingMaster() = runBlocking {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val context = instrumentation.targetContext
         val source = File.createTempFile("stage2_long_", ".m4a", context.cacheDir)
         val id = "stage2-long-${System.currentTimeMillis()}"
         try {
-            instrumentation.context.assets.open("synthetic-aac.m4a").use { input ->
+            instrumentation.context.assets.open("synthetic-aac-370s.m4a").use { input ->
                 source.outputStream().use { input.copyTo(it) }
             }
             val originalLength = source.length()
-            val chunks = AudioSegmenter.prepareAudioChunks(context, id, source, "audio/mp4", 72, 10).getOrThrow()
-            assertTrue(chunks.size > 1)
-            assertEquals(0L, chunks.first().startOffsetSec)
-            assertEquals(72L, chunks.last().endOffsetSec)
+            val chunks = AudioSegmenter.prepareAudioChunks(context, id, source, "audio/mp4", 370).getOrThrow()
+            val windows = listOf(0L to 180L, 178L to 358L, 356L to 370L)
+            assertEquals(windows, chunks.map { it.startOffsetSec to it.endOffsetSec })
             assertEquals(chunks.indices.toList(), chunks.map { it.index })
             chunks.forEach { chunk ->
+                assertTrue(chunk.isTempChunk)
+                assertEquals(File(context.cacheDir, "processing_audio_chunks/$id").canonicalFile, chunk.file.parentFile?.canonicalFile)
                 val extractor = android.media.MediaExtractor()
                 try {
                     extractor.setDataSource(chunk.file.absolutePath)
@@ -66,6 +77,30 @@ class Stage2ProcessingInstrumentedTest {
                     extractor.release()
                 }
             }
+            val bytes = chunks[1].file.readBytes()
+            val client = OkHttpClient.Builder().addInterceptor { chain ->
+                val body = Buffer()
+                chain.request().body!!.writeTo(body)
+                val data = JSONObject(body.readUtf8()).getJSONObject("data")
+                assertEquals("audio_transcription", data.getString("task"))
+                assertEquals("audio/mp4", data.getString("mimeType"))
+                val decoded = android.util.Base64.decode(data.getString("audioBase64"), android.util.Base64.DEFAULT)
+                org.junit.Assert.assertArrayEquals(bytes, decoded)
+                val result = JSONObject().put("result", JSONObject().put("text",
+                    """{"bahasa":"id","segmen":[{"mulaiDetik":0,"selesaiDetik":1,"teks":"Contoh"}]}"""))
+                Response.Builder().request(chain.request()).protocol(Protocol.HTTP_1_1).code(200).message("OK")
+                    .body(result.toString().toResponseBody("application/json".toMediaType())).build()
+            }.build()
+            val ai = AiService(backendAiClient = MeetingBackendAiClient(
+                baseUrl = "https://notulenku.local.invalid", tokenProvider = { "test-token" }, baseClient = client
+            ))
+            assertEquals("Contoh", ai.transcribeAudio(bytes, "audio/mp4", null, emptyList()).getOrThrow().segments.single().teks)
+
+            AudioSegmenter.cleanupTempChunkDir(context, id, source.absolutePath)
+            assertTrue(chunks.none { it.file.exists() })
+            val rebuilt = AudioSegmenter.prepareAudioChunks(context, id, source, "audio/mp4", 370).getOrThrow()
+            assertEquals(windows, rebuilt.map { it.startOffsetSec to it.endOffsetSec })
+            assertEquals(chunks.map { it.file }, rebuilt.map { it.file })
             assertEquals(originalLength, source.length())
         } finally {
             AudioSegmenter.cleanupTempChunkDir(context, id, source.absolutePath)

@@ -1,5 +1,7 @@
 package com.example
 
+import com.notulenrapat.android.R
+
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent

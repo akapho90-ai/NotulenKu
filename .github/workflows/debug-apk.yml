@@ -21,7 +21,7 @@ jobs:
     timeout-minutes: 35
     env:
       FIREBASE_PROJECT_ID: gen-lang-client-0830960267
-      ANDROID_APP_ID: com.aistudio.notulenrapat.kxmpzq
+      ANDROID_APP_ID: com.notulenrapat.android
       SIGNING_SHA1: 20:b5:85:e1:70:90:ec:db:16:0a:8b:8c:27:02:e6:59:ff:99:9c:b2
 
     steps:
@@ -48,12 +48,12 @@ jobs:
       - name: Restore and verify Firebase and signing configuration
         shell: bash
         env:
-          GOOGLE_SERVICES_JSON_BASE64: ${{ secrets.GOOGLE_SERVICES_JSON_BASE64 }}
+          GOOGLE_SERVICES_JSON_BASE64: ${{ secrets.NOTULENKU_ANDROID_GOOGLE_SERVICES_JSON_BASE64 }}
           NOTULENKU_DEBUG_KEYSTORE_BASE64: ${{ secrets.NOTULENKU_DEBUG_KEYSTORE_BASE64 }}
           NOTULENKU_DEBUG_STORE_PASSWORD: ${{ secrets.NOTULENKU_DEBUG_STORE_PASSWORD }}
           NOTULENKU_DEBUG_KEYSTORE_PATH: ${{ runner.temp }}/notulenku-debug.p12
         run: |
-          : "${GOOGLE_SERVICES_JSON_BASE64:?Set the GOOGLE_SERVICES_JSON_BASE64 repository secret}"
+          : "${GOOGLE_SERVICES_JSON_BASE64:?Set NOTULENKU_ANDROID_GOOGLE_SERVICES_JSON_BASE64 for com.notulenrapat.android}"
           : "${NOTULENKU_DEBUG_KEYSTORE_BASE64:?Set the NOTULENKU_DEBUG_KEYSTORE_BASE64 repository secret}"
           : "${NOTULENKU_DEBUG_STORE_PASSWORD:?Set the NOTULENKU_DEBUG_STORE_PASSWORD repository secret}"
 
@@ -81,7 +81,7 @@ jobs:
                     ((.android_info.certificate_hash // "") | gsub(":"; "") | ascii_downcase) == $sha1)
                 )
               ' google-services.json > /dev/null; then
-            echo '::error::Firebase config must match the project, package, Web OAuth client, and registered debug SHA-1.'
+            echo '::error::The Firebase config must contain the registered com.notulenrapat.android app, Web OAuth client and matching debug SHA-1. Update NOTULENKU_ANDROID_GOOGLE_SERVICES_JSON_BASE64 for the new Android app.'
             exit 1
           fi
 

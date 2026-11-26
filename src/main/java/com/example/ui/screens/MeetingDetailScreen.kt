@@ -71,7 +71,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import com.example.R
+import com.notulenrapat.android.R
 import com.example.audio.MeetingAudioPlayer
 import com.example.data.ai.TranscriptCorrectionItem
 import com.example.data.model.Meeting

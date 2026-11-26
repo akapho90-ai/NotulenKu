@@ -12,26 +12,26 @@ import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
-import android.media.AudioAttributes
-import android.media.AudioFocusRequest
 import android.media.AudioManager
 import android.media.AudioRecordingConfiguration
 import android.media.MediaRecorder
 import android.os.Build
 import android.os.IBinder
 import android.os.StatFs
+import android.os.SystemClock
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
 import androidx.core.content.ContextCompat
 import com.example.MainActivity
-import com.example.R
+import com.notulenrapat.android.R
 import com.example.export.ExportUtils
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -53,32 +53,16 @@ class MeetingRecordingService : Service() {
     private var recorder: MediaRecorder? = null
     private var currentSegmentFile: File? = null
     private var currentSegmentStartElapsedSec: Long = 0L
+    private var currentSegmentClockStartMs: Long = 0L
+    private var nextSegmentIndex = 0
     private var sessionId: String = ""
     private var ownerUserId: String = ""
     private var sessionCreatedAtMs: Long = 0L
     private val completedSegmentFiles = mutableListOf<File>()
 
     private var tickerJob: Job? = null
-    private var audioFocusRequest: AudioFocusRequest? = null
     private var audioRecordingCallback: AudioManager.AudioRecordingCallback? = null
     private var noisyReceiverRegistered = false
-
-    private val audioFocusListener = AudioManager.OnAudioFocusChangeListener { focusChange ->
-        when (focusChange) {
-            AudioManager.AUDIOFOCUS_LOSS,
-            AudioManager.AUDIOFOCUS_LOSS_TRANSIENT,
-            AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK -> {
-                if (RecordingStateRepository.state.value.status == RecordingStatus.RECORDING) {
-                    val reason = if (isPhoneOrVoipCallActive()) {
-                        "Rekaman dijeda otomatis karena panggilan masuk/aktif. Ketuk Lanjut setelah panggilan selesai."
-                    } else {
-                        "Rekaman dijeda otomatis karena fokus audio/mikrofon dipakai aplikasi lain. Ketuk Lanjut untuk meneruskan."
-                    }
-                    pauseDueToInterruption(reason, micSilenced = true)
-                }
-            }
-        }
-    }
 
     private val audioDeviceReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
@@ -150,9 +134,12 @@ class MeetingRecordingService : Service() {
             return
         }
 
-        if (isPhoneOrVoipCallActive()) {
+        val interruption = currentInterruption()
+        if (interruption != null) {
             RecordingStateRepository.update {
-                it.copy(lastError = "Mikrofon sedang digunakan untuk panggilan telepon/VoIP. Selesaikan panggilan lalu mulai merekam.")
+                it.copy(lastError = if (interruption == RecordingInterruption.CALL) {
+                    "Panggilan terdeteksi. Selesaikan panggilan sebelum mulai merekam."
+                } else "Mikrofon sedang dibisukan oleh Android.")
             }
             stopSelf()
             return
@@ -162,9 +149,17 @@ class MeetingRecordingService : Service() {
         ownerUserId = uid.ifBlank { "local" }
         sessionCreatedAtMs = System.currentTimeMillis()
         completedSegmentFiles.clear()
+        nextSegmentIndex = 0
         currentSegmentStartElapsedSec = 0L
 
-        startForegroundSafely(buildNotification(RecordingStatus.RECORDING, 0L, null))
+        try {
+            startForegroundSafely(buildNotification(RecordingStatus.IDLE, 0L, null))
+        } catch (error: RuntimeException) {
+            Log.w(TAG, "Could not start microphone foreground service", error)
+            RecordingStateRepository.update { it.copy(lastError = "Buka NotulenKu untuk mulai merekam.") }
+            stopSelf()
+            return
+        }
         registerSystemAudioMonitors()
 
         val started = startNewRecorderSegment()
@@ -196,6 +191,7 @@ class MeetingRecordingService : Service() {
             )
         }
         persistJournal()
+        updateNotificationNow()
         startTicker()
     }
 
@@ -218,7 +214,6 @@ class MeetingRecordingService : Service() {
     private fun pauseDueToInterruption(reason: String, micSilenced: Boolean) {
         val st = RecordingStateRepository.state.value
         if (st.status != RecordingStatus.RECORDING) return
-        finalizeCurrentSegmentSafely()
         tickerJob?.cancel()
         RecordingStateRepository.update {
             it.copy(
@@ -227,6 +222,7 @@ class MeetingRecordingService : Service() {
                 pauseReason = reason
             )
         }
+        finalizeCurrentSegmentSafely()
         persistJournal()
         updateNotificationNow()
     }
@@ -247,18 +243,19 @@ class MeetingRecordingService : Service() {
             }
             return
         }
-        if (isPhoneOrVoipCallActive()) {
+        val interruption = currentInterruption()
+        if (interruption != null) {
             RecordingStateRepository.update {
                 it.copy(
+                    status = RecordingStatus.PAUSED_INTERRUPTED,
                     isMicMutedBySystem = true,
-                    pauseReason = "Panggilan masih berlangsung. Tunggu panggilan selesai lalu ketuk Lanjut."
+                    pauseReason = interruption.pauseMessage
                 )
             }
             updateNotificationNow()
             return
         }
 
-        requestAudioFocusSafely()
         val ok = startNewRecorderSegment()
         if (!ok) {
             RecordingStateRepository.update {
@@ -289,6 +286,7 @@ class MeetingRecordingService : Service() {
 
     private fun handleStop() {
         val st = RecordingStateRepository.state.value
+        if (st.status == RecordingStatus.STOPPING) return
         if (!st.isSessionActive) {
             stopSelf()
             return
@@ -297,6 +295,7 @@ class MeetingRecordingService : Service() {
         tickerJob?.cancel()
         RecordingStateRepository.update { it.copy(status = RecordingStatus.STOPPING) }
         finalizeCurrentSegmentSafely()
+        persistJournal()
         cleanupMonitors()
 
         val finalElapsed = st.elapsedSeconds.coerceAtLeast(1L)
@@ -317,8 +316,9 @@ class MeetingRecordingService : Service() {
                     val identity = RecordingFileIdentity.next(applicationContext)
                     RecordingFileIdentity.saveMaster(applicationContext, capturedSegments, identity.fileName).getOrThrow()
                 }
+                ensureActive()
                 mergeResult.onSuccess { merged ->
-                    val detectedDur = AudioSegmenter.detectDurationSeconds(merged).coerceAtLeast(finalElapsed)
+                    val detectedDur = AudioSegmenter.detectDurationSeconds(merged).takeIf { it > 0L } ?: finalElapsed
                     // Delete raw segment parts ONLY after merged file is confirmed valid
                     if (merged.exists() && merged.length() > 256L) {
                         capturedSegments.filter { it.absolutePath != merged.absolutePath }
@@ -343,7 +343,7 @@ class MeetingRecordingService : Service() {
                     val fallbackSeg = capturedSegments.maxByOrNull { it.length() }
                     val fallbackDuration = fallbackSeg?.let(AudioSegmenter::detectDurationSeconds) ?: 0L
                     if (fallbackSeg != null && capturedSegments.size == 1 && fallbackDuration > 0L) {
-                        val detectedDur = fallbackDuration.coerceAtLeast(finalElapsed)
+                        val detectedDur = fallbackDuration
                         RecordingStateRepository.deleteSessionJournal(applicationContext, activeSessionId)
                         RecordingStateRepository.update {
                             ActiveRecordingState(
@@ -377,11 +377,15 @@ class MeetingRecordingService : Service() {
     }
 
     private fun startNewRecorderSegment(): Boolean {
+        var candidate: MediaRecorder? = null
+        var candidateFile: File? = null
+        var started = false
         return try {
-            val segDir = File(filesDir, "recordings/parts_$sessionId").apply { mkdirs() }
-            val segIndex = completedSegmentFiles.size
-            val file = File(segDir, "part_${"%04d".format(segIndex)}.m4a")
-            currentSegmentFile = file
+            val segDir = File(filesDir, "recordings/parts_$sessionId")
+            check(segDir.isDirectory || segDir.mkdirs()) { "Folder segmen rekaman tidak tersedia." }
+            val segIndex = nextSegmentIndex++
+            val file = File(segDir, "part_${segIndex.toString().padStart(4, '0')}.m4a")
+            candidateFile = file
 
             val mr = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
                 MediaRecorder(this)
@@ -389,6 +393,7 @@ class MeetingRecordingService : Service() {
                 @Suppress("DEPRECATION")
                 MediaRecorder()
             }
+            candidate = mr
             mr.setAudioSource(MediaRecorder.AudioSource.MIC)
             mr.setOutputFormat(MediaRecorder.OutputFormat.MPEG_4)
             mr.setAudioEncoder(MediaRecorder.AudioEncoder.AAC)
@@ -397,6 +402,7 @@ class MeetingRecordingService : Service() {
             mr.setAudioChannels(1)
             mr.setOutputFile(file.absolutePath)
             mr.setOnErrorListener { _, what, extra ->
+                if (recorder !== mr) return@setOnErrorListener
                 Log.e(TAG, "MediaRecorder error what=$what extra=$extra")
                 pauseDueToInterruption(
                     "Terjadi gangguan mikrofon perangkat (kode $what). Bagian sebelumnya telah diamankan.",
@@ -404,19 +410,41 @@ class MeetingRecordingService : Service() {
                 )
             }
             mr.setOnInfoListener { _, what, _ ->
+                if (recorder !== mr) return@setOnInfoListener
                 if (what == MediaRecorder.MEDIA_RECORDER_INFO_MAX_FILESIZE_REACHED ||
                     what == MediaRecorder.MEDIA_RECORDER_INFO_MAX_DURATION_REACHED
                 ) {
                     rotateSegmentSafely()
                 }
             }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                val callback = object : AudioManager.AudioRecordingCallback() {
+                    override fun onRecordingConfigChanged(configs: MutableList<AudioRecordingConfiguration>?) {
+                        if (recorder !== mr) return
+                        val interruption = currentInterruption(mr, configs?.any { it.isClientSilenced } == true)
+                        interruption?.let { pauseDueToInterruption(it.pauseMessage, micSilenced = true) }
+                    }
+                }
+                runCatching { mr.registerAudioRecordingCallback(mainExecutor, callback) }
+                    .onSuccess { audioRecordingCallback = callback }
+                    .onFailure { Log.w(TAG, "Recording-specific callback unavailable", it) }
+            }
             mr.prepare()
             mr.start()
+            started = true
+            check(currentInterruption(mr) == null) { "Mikrofon belum tersedia untuk merekam." }
             recorder = mr
+            currentSegmentFile = file
+            currentSegmentClockStartMs = SystemClock.elapsedRealtime()
             true
         } catch (e: Exception) {
             Log.e(TAG, "startNewRecorderSegment failed", e)
-            runCatching { recorder?.release() }
+            candidate?.let { failed ->
+                unregisterRecorderCallback(failed)
+                if (started) runCatching { failed.stop() }
+                runCatching { failed.release() }
+            }
+            candidateFile?.let { if (it.length() == 0L) it.delete() }
             recorder = null
             currentSegmentFile = null
             false
@@ -433,6 +461,7 @@ class MeetingRecordingService : Service() {
         recorder = null
         currentSegmentFile = null
         if (mr != null) {
+            unregisterRecorderCallback(mr)
             try {
                 mr.stop()
             } catch (e: Exception) {
@@ -479,14 +508,17 @@ class MeetingRecordingService : Service() {
             var ticks = 0
             while (isActive && RecordingStateRepository.state.value.status == RecordingStatus.RECORDING) {
                 delay(125L)
+                val interruption = currentInterruption(recorder)
+                if (interruption != null) {
+                    pauseDueToInterruption(interruption.pauseMessage, micSilenced = true)
+                    break
+                }
                 ticks++
                 val amp = runCatching { recorder?.maxAmplitude ?: 0 }.getOrDefault(0)
                 val normalized = (amp / 18000f).coerceIn(0.08f, 1.0f)
 
-                var newElapsed = RecordingStateRepository.state.value.elapsedSeconds
-                if (ticks % 8 == 0) {
-                    newElapsed += 1L
-                }
+                val newElapsed = currentSegmentStartElapsedSec +
+                    (SystemClock.elapsedRealtime() - currentSegmentClockStartMs).coerceAtLeast(0L) / 1_000L
 
                 RecordingStateRepository.update { cur ->
                     cur.copy(
@@ -496,16 +528,6 @@ class MeetingRecordingService : Service() {
                 }
 
                 if (ticks % 8 == 0) {
-                    // Check system call mode & notification update once per second
-                    if (isPhoneOrVoipCallActive()) {
-                        serviceScope.launch(Dispatchers.Main.immediate) {
-                            pauseDueToInterruption(
-                                "Rekaman dijeda otomatis karena panggilan aktif. Ketuk Lanjut setelah panggilan selesai.",
-                                micSilenced = true
-                            )
-                        }
-                        break
-                    }
                     if (newElapsed % 15L == 0L) {
                         if (!hasEnoughStorage()) {
                             serviceScope.launch(Dispatchers.Main.immediate) {
@@ -532,26 +554,6 @@ class MeetingRecordingService : Service() {
     }
 
     private fun registerSystemAudioMonitors() {
-        requestAudioFocusSafely()
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
-            val cb = object : AudioManager.AudioRecordingCallback() {
-                override fun onRecordingConfigChanged(configs: MutableList<AudioRecordingConfiguration>?) {
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                        val silenced = configs?.any { it.isClientSilenced } == true
-                        if (silenced && RecordingStateRepository.state.value.status == RecordingStatus.RECORDING) {
-                            serviceScope.launch(Dispatchers.Main.immediate) {
-                                pauseDueToInterruption(
-                                    "Mikrofon dibisukan oleh Android karena panggilan atau aplikasi lain mengambil mikrofon. Rekaman dijeda aman — ketuk Lanjut setelah selesai.",
-                                    micSilenced = true
-                                )
-                            }
-                        }
-                    }
-                }
-            }
-            audioRecordingCallback = cb
-            runCatching { audioManager.registerAudioRecordingCallback(cb, null) }
-        }
         val filter = IntentFilter().apply {
             addAction(AudioManager.ACTION_AUDIO_BECOMING_NOISY)
             addAction(AudioManager.ACTION_SCO_AUDIO_STATE_UPDATED)
@@ -562,58 +564,27 @@ class MeetingRecordingService : Service() {
         }
     }
 
-    private fun requestAudioFocusSafely() {
-        runCatching {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                val req = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_EXCLUSIVE)
-                    .setAudioAttributes(
-                        AudioAttributes.Builder()
-                            .setUsage(AudioAttributes.USAGE_MEDIA)
-                            .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
-                            .build()
-                    )
-                    .setOnAudioFocusChangeListener(audioFocusListener)
-                    .build()
-                audioFocusRequest = req
-                audioManager.requestAudioFocus(req)
-            } else {
-                @Suppress("DEPRECATION")
-                audioManager.requestAudioFocus(
-                    audioFocusListener,
-                    AudioManager.STREAM_MUSIC,
-                    AudioManager.AUDIOFOCUS_GAIN_TRANSIENT
-                )
-            }
+    private fun unregisterRecorderCallback(owner: MediaRecorder) {
+        val callback = audioRecordingCallback ?: return
+        audioRecordingCallback = null
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            runCatching { owner.unregisterAudioRecordingCallback(callback) }
         }
     }
 
     private fun cleanupMonitors() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
-            audioRecordingCallback?.let { cb ->
-                runCatching { audioManager.unregisterAudioRecordingCallback(cb) }
-            }
-            audioRecordingCallback = null
-        }
-        runCatching {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                audioFocusRequest?.let { audioManager.abandonAudioFocusRequest(it) }
-                audioFocusRequest = null
-            } else {
-                @Suppress("DEPRECATION")
-                audioManager.abandonAudioFocus(audioFocusListener)
-            }
-        }
         if (noisyReceiverRegistered) {
             runCatching { unregisterReceiver(audioDeviceReceiver) }
             noisyReceiverRegistered = false
         }
     }
 
-    private fun isPhoneOrVoipCallActive(): Boolean {
+    private fun currentInterruption(owner: MediaRecorder? = null, callbackSilenced: Boolean = false): RecordingInterruption? {
         val mode = runCatching { audioManager.mode }.getOrDefault(AudioManager.MODE_NORMAL)
-        return mode == AudioManager.MODE_IN_CALL ||
-            mode == AudioManager.MODE_IN_COMMUNICATION ||
-            mode == AudioManager.MODE_RINGTONE
+        val muted = runCatching { audioManager.isMicrophoneMute }.getOrDefault(false)
+        val recorderSilenced = Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q &&
+            runCatching { owner?.activeRecordingConfiguration?.isClientSilenced == true }.getOrDefault(false)
+        return RecordingInterruption.detect(mode, muted, recorderSilenced || callbackSilenced)
     }
 
     private fun hasEnoughStorage(): Boolean {
@@ -739,9 +710,15 @@ class MeetingRecordingService : Service() {
 
     override fun onDestroy() {
         tickerJob?.cancel()
-        if (RecordingStateRepository.state.value.isSessionActive) {
-            finalizeCurrentSegmentSafely()
-            persistJournal()
+        val state = RecordingStateRepository.state.value
+        if (state.isSessionActive && state.sessionId == sessionId) {
+            if (state.status != RecordingStatus.STOPPING) {
+                finalizeCurrentSegmentSafely()
+                persistJournal()
+            }
+            RecordingStateRepository.update {
+                ActiveRecordingState(lastError = "Layanan rekaman berhenti. Buka kembali halaman Rekam untuk memeriksa pemulihan.")
+            }
         }
         cleanupMonitors()
         serviceScope.cancel()
@@ -749,10 +726,10 @@ class MeetingRecordingService : Service() {
     }
 
     companion object {
-        const val ACTION_START = "com.example.audio.ACTION_START_RECORDING"
-        const val ACTION_PAUSE = "com.example.audio.ACTION_PAUSE_RECORDING"
-        const val ACTION_RESUME = "com.example.audio.ACTION_RESUME_RECORDING"
-        const val ACTION_STOP = "com.example.audio.ACTION_STOP_RECORDING"
+        const val ACTION_START = "${com.notulenrapat.android.BuildConfig.APPLICATION_ID}.audio.ACTION_START_RECORDING"
+        const val ACTION_PAUSE = "${com.notulenrapat.android.BuildConfig.APPLICATION_ID}.audio.ACTION_PAUSE_RECORDING"
+        const val ACTION_RESUME = "${com.notulenrapat.android.BuildConfig.APPLICATION_ID}.audio.ACTION_RESUME_RECORDING"
+        const val ACTION_STOP = "${com.notulenrapat.android.BuildConfig.APPLICATION_ID}.audio.ACTION_STOP_RECORDING"
         const val EXTRA_OWNER_UID = "extra_owner_uid"
 
         fun start(context: Context, ownerUserId: String) {

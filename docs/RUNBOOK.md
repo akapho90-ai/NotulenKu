@@ -46,33 +46,31 @@ supabase functions deploy meeting-api \
 
 ## 2. Konfigurasi Login Google, `google-services.json`, & Keystore Tetap
 
-### Identitas Proyek (Jangan Diubah)
-- Android Package Name: `com.aistudio.notulenrapat.kxmpzq`
+### Identitas Proyek
+- Android Package Name: `com.notulenrapat.android`
 - Firebase Project ID: `gen-lang-client-0830960267`
 - Firebase Project Number: `699450924977`
 
-### Penyebab Umum Gagal Login Google di Perangkat
-1. `app/google-services.json` tidak sinkron atau tidak memiliki `oauth_client` bertipe `3` (Web Client ID) sehingga `default_web_client_id` kosong.
-2. Sidik jari **SHA-1** dan **SHA-256** dari keystore yang dipakai menandatangani APK (Debug maupun Release/Upload) belum didaftarkan di **Firebase Console → Project Settings → Your apps → Android (`com.aistudio.notulenrapat.kxmpzq`)**.
-3. Keystore rilis berubah-ubah antar build CI/CD.
+Android memasang ID baru sebagai aplikasi terpisah dari `com.aistudio.notulenrapat.kxmpzq`. Rekaman privat, sesi login, keystore vault, dan checkpoint lama tetap berada di instalasi lama. Master baru memakai `Android/media/com.notulenrapat.android/NotulenKu/Meet/` jika penyimpanan media tersedia.
 
-### Fingerprint `debug.keystore` yang Teramati di Workspace Saat Ini
-- **SHA-1:** `E7:52:C1:79:80:36:F4:B7:6E:54:4D:11:F2:82:16:31:4F:E9:11:D0`
-- **SHA-256:** `51:CC:EB:83:65:E3:E3:C7:33:B2:EC:E0:6E:E7:D0:66:6F:CE:73:FF:4D:82:D6:87:A0:C2:C7:7E:D6:E4:87:7E`
+### Penyebab Umum Gagal Login Google di Perangkat
+1. `google-services.json` tidak sinkron atau tidak memiliki `oauth_client` bertipe `3` (Web Client ID) sehingga `default_web_client_id` kosong.
+2. Sidik jari **SHA-1** dan **SHA-256** dari keystore yang dipakai menandatangani APK (Debug maupun Release/Upload) belum didaftarkan di **Firebase Console → Project Settings → Your apps → Android (`com.notulenrapat.android`)**.
+3. Keystore rilis berubah-ubah antar build CI/CD.
 
 ### Langkah Menyiapkan Keystore Tetap & Firebase Console
 1. **Gunakan 1 Keystore Rilis Tetap (alias `upload`)** — simpan aman di brankas tim & GitHub Actions Secrets (JANGAN commit ke repository):
    - `KEYSTORE_BASE64` (hasil `base64 -w 0 upload-keystore.jks`)
    - `STORE_PASSWORD`
    - `KEY_PASSWORD`
-   - `GOOGLE_SERVICES_JSON_BASE64` (file `app/google-services.json` terbaru dari Firebase Console)
+   - `NOTULENKU_ANDROID_GOOGLE_SERVICES_JSON_BASE64` (konfigurasi Firebase resmi untuk `com.notulenrapat.android`). Secret berbeda menjaga workflow package lama tetap bisa memakai konfigurasinya.
 2. Ambil SHA-1 dan SHA-256 keystore rilis:
    ```bash
    keytool -list -v -keystore upload-keystore.jks -alias upload
    ```
-3. Daftarkan **SHA-1** dan **SHA-256** (baik debug maupun release/upload, serta Google Play App Signing jika memakai Play Console) di **Firebase Console → Project Settings → Android App (`com.aistudio.notulenrapat.kxmpzq`)**.
+3. Daftarkan aplikasi Android `com.notulenrapat.android` di proyek Firebase yang sama. Tambahkan **SHA-1** dan **SHA-256** dari sertifikat APK yang benar-benar dipakai. SHA-1 debug CI diperiksa oleh `SIGNING_SHA1` di workflow. Daftarkan juga package baru pada App Check untuk peluncuran biasa.
 4. Pastikan metode **Google** aktif di **Firebase Console → Authentication → Sign-in method**.
-5. Unduh ulang `google-services.json` terbaru dari Firebase Console setelah menambahkan SHA-1/SHA-256, lalu pastikan nilai `default_web_client_id` tergenerate saat build.
+5. Ambil konfigurasi resmi dengan `npx -y firebase-tools@latest apps:sdkconfig ANDROID <FIREBASE_ANDROID_APP_ID> --project gen-lang-client-0830960267`. Gunakan JSON aplikasi baru untuk `google-services.json` lokal dan secret CI di atas. Gradle membutuhkan Web OAuth client untuk menghasilkan `default_web_client_id`.
 
 ### Peringatan Keamanan Data Saat Pembaruan APK
 - **JANGAN uninstall APK lama** sebelum memastikan rekaman audio lokal yang masih dibutuhkan sudah diekspor/dicadangkan, karena file rekaman asli disimpan di penyimpanan privat aplikasi pada perangkat.
