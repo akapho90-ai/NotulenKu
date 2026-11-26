@@ -29,7 +29,7 @@ data class PreparedAudioChunk(
 )
 
 object AudioSegmenter {
-    const val DEFAULT_CHUNK_DURATION_SEC = 180L // 3-minute STT chunks)
+    const val DEFAULT_CHUNK_DURATION_SEC = 600L // 10 minutes (~2.4 MB at 32 kbps AAC)
     const val DEFAULT_OVERLAP_SEC = 2L
     const val MAX_DIRECT_UPLOAD_BYTES = 8L * 1024L * 1024L // 8 MB safe threshold under 10 MB backend cap
 
@@ -173,9 +173,7 @@ object AudioSegmenter {
             )
         }
 
-        val chunkRoot = File(android.os.Environment.getExternalStorageDirectory(), "Android/media/NotulenKu/chunk")
-        cleanupExpiredChunks(chunkRoot, sessionId)
-        val chunkDir = File(chunkRoot, sessionId).apply { mkdirs() }
+        val chunkDir = File(context.cacheDir, "transcription_chunks/$sessionId").apply { mkdirs() }
         // Adjust chunk duration downward if bitrate is high so each chunk stays safely under 8 MB
         val bytesPerSec = (sourceFile.length().toDouble() / detectedDurationSec.toDouble()).coerceAtLeast(1000.0)
         val sizeSafeChunkSec = ((MAX_DIRECT_UPLOAD_BYTES * 0.75) / bytesPerSec).toLong().coerceIn(60L, chunkDurationSec)
@@ -295,8 +293,7 @@ object AudioSegmenter {
      * into one valid .m4a file using MediaExtractor + MediaMuxer.
      */
     fun mergeM4aSegments(segmentFiles: List<File>, outputFile: File): Result<File> {
-        val validFiles = segmentFiles.sortedBy { it.name }.filter { it.exists() && it.length() > 512L && detectDurationSeconds(it) > 0L }
-        if (validFiles.size != segmentFiles.size) return Result.failure(IllegalStateException("Merge dibatalkan: ada segmen yang tidak valid atau hilang. Semua segmen harus tervalidasi."))
+        val validFiles = segmentFiles.filter { it.exists() && it.length() > 256L }
         if (validFiles.isEmpty()) {
             return Result.failure(IllegalStateException("Tidak ada segmen rekaman yang valid untuk digabungkan."))
         }
@@ -340,7 +337,7 @@ object AudioSegmenter {
                 try {
                     extractor.setDataSource(segFile.absolutePath)
                     val trackIdx = findAudioTrackIndex(extractor)
-                    if (trackIdx < 0) throw IllegalStateException("Segmen ${segFile.name} tidak memiliki trek audio.")
+                    if (trackIdx < 0) continue
                     extractor.selectTrack(trackIdx)
 
                     var segBasePtsUs = -1L
@@ -361,7 +358,7 @@ object AudioSegmenter {
                     // Add ~64ms AAC frame spacing between segments to keep timestamps strictly monotonic
                     globalPtsOffsetUs += lastSegPtsUs + 64_000L
                 } catch (segErr: Exception) {
-                    throw IllegalStateException("Segmen ${segFile.name} gagal diproses; merge tidak boleh parsial.", segErr)
+                    Log.w(TAG, "Skipping unreadable segment ${segFile.name} during merge: ${segErr.message}")
                 } finally {
                     runCatching { extractor.release() }
                 }
@@ -401,24 +398,12 @@ object AudioSegmenter {
         }
     }
 
-    private const val CHUNK_RETENTION_MS = 72L * 60L * 60L * 1000L
-
-    /** Remove expired session folders only; the current processing session is excluded. */
-    fun cleanupExpiredChunks(root: File, activeSessionId: String? = null, nowMs: Long = System.currentTimeMillis()): Int {
-        if (!root.exists()) return 0
-        var removed = 0
-        root.listFiles()?.filter { it.isDirectory && it.name != activeSessionId }?.forEach { dir ->
-            val lastTouched = dir.lastModified().takeIf { it > 0L } ?: nowMs
-            if (nowMs - lastTouched >= CHUNK_RETENTION_MS && runCatching { dir.deleteRecursively() }.getOrDefault(false)) removed++
-        }
-        return removed
-    }
-
     fun cleanupTempChunkDir(context: Context, sessionId: String) {
         if (sessionId.isBlank()) return
-        val root = File(android.os.Environment.getExternalStorageDirectory(), "Android/media/NotulenKu/chunk")
-        val dir = File(root, sessionId)
-        if (dir.exists()) runCatching { dir.deleteRecursively() }
+        val dir = File(context.cacheDir, "transcription_chunks/$sessionId")
+        if (dir.exists()) {
+            runCatching { dir.deleteRecursively() }
+        }
     }
 
     private fun findAudioTrackIndex(extractor: MediaExtractor): Int {

@@ -313,9 +313,8 @@ class MeetingRecordingService : Service() {
                     )
                 }
             } else {
-                val outDir = RecordingFileIdentity.masterDirectory(applicationContext)
-                val identity = RecordingFileIdentity.next(applicationContext)
-                val finalFile = File(outDir, identity.fileName)
+                val outDir = File(filesDir, "recordings").apply { mkdirs() }
+                val finalFile = File(outDir, "rec_${activeSessionId}.m4a")
                 val mergeResult = AudioSegmenter.mergeM4aSegments(capturedSegments, finalFile)
                 mergeResult.onSuccess { merged ->
                     val detectedDur = AudioSegmenter.detectDurationSeconds(merged).coerceAtLeast(finalElapsed)
