@@ -10,7 +10,6 @@ import android.util.Log
 import com.example.data.model.TranscriptSegment
 import java.io.File
 import java.nio.ByteBuffer
-import java.util.Locale
 
 private const val TAG = "AudioSegmenter"
 
@@ -121,7 +120,7 @@ object AudioSegmenter {
         if (prevText.isNullOrBlank() || cleanNext.isBlank()) return cleanNext
         val prevWords = normalizeWords(prevText)
         val nextWordsRaw = cleanNext.split(Regex("\\s+"))
-        val nextWordsNorm = nextWordsRaw.map { it.lowercase(Locale.ROOT).replace(Regex("[^\\p{L}\\p{N}]"), "") }
+        val nextWordsNorm = nextWordsRaw.map { it.lowercase().replace(Regex("[^a-z0-9]"), "") }
         val maxCheck = minOf(prevWords.size, nextWordsNorm.size, 8)
         for (len in maxCheck downTo 3) {
             val prevSuffix = prevWords.takeLast(len)
@@ -135,8 +134,8 @@ object AudioSegmenter {
     }
 
     private fun normalizeWords(text: String): List<String> =
-        text.lowercase(Locale.ROOT)
-            .replace(Regex("[^\\p{L}\\p{N}\\s]"), " ")
+        text.lowercase()
+            .replace(Regex("[^a-z0-9\\s]"), " ")
             .trim()
             .split(Regex("\\s+"))
             .filter { it.isNotBlank() }
