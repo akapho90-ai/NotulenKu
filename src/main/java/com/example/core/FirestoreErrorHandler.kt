@@ -74,13 +74,13 @@ fun toFriendlyIndonesianError(error: Throwable?): String {
             msg.contains("network", ignoreCase = true) ||
             msg.contains("timeout", ignoreCase = true) ->
             "Koneksi jaringan bermasalah atau habis waktu. Periksa internet Anda dan coba lagi."
+        msg.contains("App Check", ignoreCase = true) ->
+            "Verifikasi App Check gagal pada layanan Firebase. Periksa koneksi internet Anda."
         msg.contains("PERMISSION_DENIED", ignoreCase = true) ->
             "Akses ditolak. Periksa izin akun Anda."
         msg.contains("Quota exceeded", ignoreCase = true) ||
             msg.contains("RESOURCE_EXHAUSTED", ignoreCase = true) ->
             "Kuota sementara layanan AI tercapai. Tunggu beberapa saat lalu coba lagi."
-        msg.contains("App Check", ignoreCase = true) ->
-            "Verifikasi App Check gagal pada layanan Firebase. Periksa koneksi internet Anda."
         error is IllegalArgumentException && msg.isNotBlank() -> msg
         error is IllegalStateException && msg.isNotBlank() -> msg
         else -> "Terjadi kendala saat memproses permintaan. Silakan coba lagi."

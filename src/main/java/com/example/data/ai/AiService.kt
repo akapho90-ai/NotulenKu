@@ -161,9 +161,10 @@ open class AiService(
         systemPrompt: String,
         userPrompt: String,
         jsonMode: Boolean,
-        prices: List<ModelPrice>
+        prices: List<ModelPrice>,
+        usePersonalRoute: Boolean = taskName != "playground"
     ): Result<Pair<String, AiCallMeta>> {
-        val targets = resolveRouteTargets(config, "ai", usePersonalRoute = taskName != "playground")
+        val targets = resolveRouteTargets(config, "ai", usePersonalRoute = usePersonalRoute)
         if (targets.isEmpty()) return Result.failure(IllegalStateException("Provider AI yang dipilih tidak tersedia."))
         val temp = (config?.temperature ?: 0.2).toFloat()
         val maxTok = (config?.maxOutputTokens ?: 4096L).toInt().coerceIn(256, 16384)
@@ -694,10 +695,11 @@ open class AiService(
         inputText: String,
         temperature: Float,
         prices: List<ModelPrice>,
-        connectionId: String = ProviderPresets.BUILT_IN_AI_ID
+        connectionId: String = ProviderPresets.BUILT_IN_AI_ID,
+        taskName: String = "playground"
     ): Result<PlaygroundRunResult> {
         val cfg = TaskConfig(
-            task = "playground",
+            task = taskName,
             connectionId = connectionId,
             modelId = modelId,
             temperature = temperature.toDouble(),
@@ -705,12 +707,13 @@ open class AiService(
             retryCount = 0L
         )
         return executeTextTask(
-            taskName = "playground",
+            taskName = taskName,
             config = cfg,
             systemPrompt = systemPrompt,
             userPrompt = "<TRANSKRIP_DATA>\n${inputText.take(30_000)}\n</TRANSKRIP_DATA>",
             jsonMode = false,
-            prices = prices
+            prices = prices,
+            usePersonalRoute = false
         ).map { (text, meta) ->
             val (_, hasPrice) = estimateCost(meta.modelId, meta.inputTokens, meta.outputTokens, prices)
             PlaygroundRunResult(

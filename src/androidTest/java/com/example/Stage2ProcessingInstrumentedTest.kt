@@ -96,23 +96,36 @@ class Stage2ProcessingInstrumentedTest {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val context = instrumentation.targetContext
         val original = File.createTempFile("stage2_master_input_", ".m4a", context.cacheDir)
-        val directory = RecordingFileIdentity.masterDirectory(context)
-        val master = File(directory, "stage2-probe-${System.nanoTime()}.acc")
-        val mergedMaster = File(directory, "stage2-merged-probe-${System.nanoTime()}.acc")
+        val masters = mutableListOf<File>()
         try {
             instrumentation.context.assets.open("synthetic-aac.m4a").use { input ->
                 original.outputStream().use { input.copyTo(it) }
             }
-            AudioSegmenter.mergeM4aSegments(listOf(original), master).getOrThrow()
+            val name = "stage2-probe-${System.nanoTime()}.m4a"
+            val master = RecordingFileIdentity.saveMaster(context, listOf(original), name).getOrThrow()
+            masters.add(master)
+            assertTrue(master.absolutePath.contains("/Android/media/${context.packageName}/NotulenKu/Meet/"))
+            val uri = androidx.core.content.FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", master)
+            assertEquals("content", uri.scheme)
             assertEquals(original.length(), master.length())
             assertEquals(72L, AudioSegmenter.detectDurationSeconds(master))
-            AudioSegmenter.mergeM4aSegments(listOf(original, master), mergedMaster).getOrThrow()
+            val mergedMaster = RecordingFileIdentity.saveMaster(context, listOf(original, master), name).getOrThrow()
+            masters.add(mergedMaster)
+            assertTrue(master != mergedMaster && master.isFile)
+            assertEquals(master.parentFile?.canonicalFile, mergedMaster.parentFile?.canonicalFile)
             assertTrue(AudioSegmenter.detectDurationSeconds(mergedMaster) >= 143L)
             assertTrue(AudioSegmenter.prepareAudioChunks(context, "stage2-master-input", master, "audio/mp4", 72).isSuccess)
+
+            val withoutMedia = object : android.content.ContextWrapper(context) {
+                override fun getExternalMediaDirs(): Array<File> = emptyArray()
+            }
+            val fallback = RecordingFileIdentity.saveMaster(withoutMedia, listOf(original), name).getOrThrow()
+            masters.add(fallback)
+            assertEquals(File(context.filesDir, "recordings/masters").canonicalFile, fallback.parentFile?.canonicalFile)
+            assertEquals(original.length(), fallback.length())
         } finally {
             original.delete()
-            master.delete()
-            mergedMaster.delete()
+            masters.forEach { it.delete() }
         }
     }
 

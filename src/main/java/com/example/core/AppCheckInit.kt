@@ -11,6 +11,10 @@ import com.google.firebase.appcheck.recaptcha.RecaptchaAppCheckProviderFactory
 private const val TAG = "AppCheckInit"
 
 private const val RECAPTCHA_SITE_KEY_RES = "recaptcha_site_key"
+internal const val DEBUG_TOKEN_EXTRA = "FIREBASE_APPCHECK_DEBUG_TOKEN"
+
+internal fun usesDebugAppCheck(debugBuild: Boolean, debugToken: String?): Boolean =
+    debugBuild && !debugToken.isNullOrBlank()
 
 fun configureAppCheck(context: Context, intent: Intent?): Boolean {
     val firebaseApp = try {
@@ -25,7 +29,7 @@ fun configureAppCheck(context: Context, intent: Intent?): Boolean {
     }
 
     try {
-        if (BuildConfig.DEBUG) {
+        if (usesDebugAppCheck(BuildConfig.DEBUG, intent?.getStringExtra(DEBUG_TOKEN_EXTRA))) {
             // Implementasi ada di src/debug; build rilis memakai stub di src/release
             // sehingga DebugAppCheckProviderFactory tidak ikut ke APK rilis.
             installDebugAppCheckProvider(context, intent)

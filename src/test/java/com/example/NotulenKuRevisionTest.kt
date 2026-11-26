@@ -512,12 +512,22 @@ class NotulenKuRevisionTest {
             assertNotNull(periodic)
             assertEquals("Ringkasan mingguan selesai.", periodic.ringkasanEksekutif)
 
+            val routingTest = aiService.runSinglePlayground(
+                modelId = "gpt-6-luna",
+                systemPrompt = "Ringkas contoh berikut.",
+                inputText = "Keputusan rapat",
+                temperature = 0.2f,
+                prices = emptyList(),
+                taskName = "periodic_summary"
+            ).getOrThrow()
+            assertTrue(routingTest.outputText.contains("Ringkasan mingguan selesai."))
+
             // 4. Health check via backend
             val latency = aiService.testConnectionPing().getOrThrow()
             assertTrue(latency >= 0L)
 
             assertEquals(
-                listOf("audio_transcription", "meeting_qa", "periodic_summary"),
+                listOf("audio_transcription", "meeting_qa", "periodic_summary", "periodic_summary"),
                 observedTasks
             )
         } finally {

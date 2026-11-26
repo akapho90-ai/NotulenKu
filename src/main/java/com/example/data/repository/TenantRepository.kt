@@ -1,6 +1,7 @@
 package com.example.data.repository
 
 import android.content.Context
+import android.util.Log
 import com.example.R
 import com.example.core.AppConstants
 import com.example.core.OperationType
@@ -183,7 +184,7 @@ class TenantRepository(
                 userRef.set(profile.toCreateMap()).await()
             } else {
                 val updates = mutableMapOf<String, Any>()
-                if (userSnap.getString("activeTenantId").isNullOrBlank()) {
+                if (savedTenantId != activeTenantId) {
                     updates["activeTenantId"] = activeTenantId
                 }
                 if (userSnap.getString("username").isNullOrBlank()) {
@@ -283,12 +284,12 @@ class TenantRepository(
         val tenantRef = db.collection("tenants").document(tenantId)
         val memberRef = tenantRef.collection("members").document(ownerUid)
         val configs = tenantRef.collection("taskConfigs")
-        db.runTransaction { transaction ->
+        suspend fun seedDefaults(periodicOnly: Boolean) = db.runTransaction { transaction ->
             val tenant = transaction.get(tenantRef).toObject(Tenant::class.java)
             check(tenant != null && tenant.ownerId == ownerUid) { "Workspace pemilik tidak tersedia." }
-            val missingOwner = !transaction.get(memberRef).exists()
+            val missingOwner = !periodicOnly && !transaction.get(memberRef).exists()
             val missingTasks = AppConstants.AI_TASKS.filter { task ->
-                !transaction.get(configs.document(task.key)).exists()
+                (task.key == "periodic_summary") == periodicOnly && !transaction.get(configs.document(task.key)).exists()
             }
 
             if (missingOwner) {
@@ -316,6 +317,15 @@ class TenantRepository(
                 transaction.set(configs.document(task.key), config.toCreateMap())
             }
         }.await()
+
+        seedDefaults(periodicOnly = false)
+        // Older rules can reject this one task. Keep its write out of the workspace bootstrap transaction.
+        try {
+            seedDefaults(periodicOnly = true)
+        } catch (error: FirebaseFirestoreException) {
+            if (error.code != FirebaseFirestoreException.Code.PERMISSION_DENIED) throw error
+            Log.w("TenantRepository", "Workspace initialized, but default periodic routing was denied.")
+        }
     }
 
     suspend fun setActiveTenant(tenantId: String): Result<Unit> {
@@ -450,8 +460,17 @@ class TenantRepository(
     suspend fun saveTaskConfig(tenant: Tenant, config: TaskConfig): Result<Unit> {
         return try {
             val uid = requireUserId()
-            val ref = db.collection("tenants").document(tenant.id)
-                .collection("taskConfigs").document(config.task)
+            val user = auth.currentUser
+            val tenantRef = db.collection("tenants").document(tenant.id)
+            val currentTenant = tenantRef.get().await().toObject(Tenant::class.java)
+            val isPlatformAdmin = user?.uid == uid && user.isEmailVerified &&
+                user.email == AppConstants.PLATFORM_ADMIN_EMAIL
+            require(currentTenant != null && uid in currentTenant.memberUids &&
+                (uid in currentTenant.adminUids || isPlatformAdmin)) {
+                "Routing AI hanya bisa diatur oleh admin atau pemilik workspace aktif."
+            }
+            require(config.modelId.isNotBlank() && config.providerLabel.isNotBlank()) { "Pilih provider dan model AI." }
+            val ref = tenantRef.collection("taskConfigs").document(config.task)
             val existing = ref.get().await()
             if (existing.exists()) {
                 ref.update(
@@ -468,7 +487,7 @@ class TenantRepository(
                         "maxOutputTokens" to config.maxOutputTokens.coerceIn(128L, 65536L),
                         "enabled" to config.enabled,
                         "systemPromptOverride" to config.systemPromptOverride.take(2000),
-                        "memberUids" to tenant.memberUids,
+                        "memberUids" to currentTenant.memberUids,
                         "updatedAt" to FieldValue.serverTimestamp()
                     )
                 ).await()
@@ -476,7 +495,9 @@ class TenantRepository(
                 ref.set(
                     config.copy(
                         tenantId = tenant.id,
-                        memberUids = tenant.memberUids
+                        providerLabel = config.providerLabel.take(60),
+                        modelId = config.modelId.take(80),
+                        memberUids = currentTenant.memberUids
                     ).toCreateMap()
                 ).await()
             }

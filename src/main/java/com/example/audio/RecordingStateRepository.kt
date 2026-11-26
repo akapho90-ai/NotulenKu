@@ -163,9 +163,7 @@ object RecordingStateRepository {
         if (segFiles.isEmpty()) {
             return Result.failure(IllegalStateException("Berkas segmen rekaman tidak ditemukan."))
         }
-        val outDir = File(context.applicationContext.filesDir, "recordings").apply { mkdirs() }
-        val outFile = File(outDir, "rec_recovered_${session.sessionId.take(10)}.m4a")
-        val mergeRes = AudioSegmenter.mergeM4aSegments(segFiles, outFile)
+        val mergeRes = RecordingFileIdentity.saveMaster(context, segFiles, "rec_recovered_${session.sessionId.take(10)}.m4a")
         return mergeRes.map { merged ->
             val detectedDur = AudioSegmenter.detectDurationSeconds(merged).coerceAtLeast(session.elapsedSeconds)
             // Safe cleanup of raw segment parts only after merged output is confirmed readable & non-empty

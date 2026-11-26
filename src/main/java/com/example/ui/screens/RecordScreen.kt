@@ -570,6 +570,17 @@ fun RecordScreen(
                             }
                         )
 
+                        recordedAudio?.let { audio ->
+                            val path = audio.file.absolutePath
+                            Text(
+                                text = path.substringAfter("/Android/media/", "").let { relative ->
+                                    if (relative.isBlank()) "Disimpan di penyimpanan privat NotulenKu"
+                                    else "Disimpan di Android/media/$relative"
+                                },
+                                style = MaterialTheme.typography.labelSmall
+                            )
+                        }
+
                         if (!recordingState.pauseReason.isNullOrBlank() && isPaused) {
                             Spacer(modifier = Modifier.height(10.dp))
                             Surface(

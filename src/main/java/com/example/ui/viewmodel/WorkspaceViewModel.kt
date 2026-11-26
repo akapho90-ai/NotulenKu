@@ -158,7 +158,7 @@ class WorkspaceViewModel(
             val user = Firebase.auth.currentUser
             val platformAdmin = user != null && user.uid == currentUserId &&
                 user.isEmailVerified &&
-                user.email.equals(AppConstants.PLATFORM_ADMIN_EMAIL, ignoreCase = true)
+                user.email == AppConstants.PLATFORM_ADMIN_EMAIL
             UiState.Success(
                 WorkspaceSnapshot(
                     profile = profile,
@@ -422,6 +422,7 @@ class WorkspaceViewModel(
     }
 
     fun saveTaskConfig(tenant: Tenant, config: TaskConfig) {
+        if (!canConfigureRouting(tenant.id)) return
         viewModelScope.launch {
             tenantRepo.saveTaskConfig(tenant, config)
                 .onSuccess { _actionMessage.value = "Routing tugas ${config.task} diperbarui." }
@@ -430,20 +431,36 @@ class WorkspaceViewModel(
     }
 
     fun applyConfigToAllTasks(tenant: Tenant, template: TaskConfig) {
+        if (!canConfigureRouting(tenant.id)) return
         viewModelScope.launch {
             AppConstants.AI_TASKS.filter { it.key != "audio_transcription" }.forEach { def ->
                 tenantRepo.saveTaskConfig(
                     tenant,
                     template.copy(tenantId = tenant.id, task = def.key)
-                )
+                ).onFailure { error ->
+                    _actionMessage.value = "Routing ${def.key}: ${toFriendlyIndonesianError(error)}"
+                    return@launch
+                }
             }
             _actionMessage.value = "Pengaturan ${template.providerLabel} (${template.modelId}) diterapkan ke semua tugas teks AI."
         }
     }
 
     fun testTaskConfig(tenant: Tenant, config: TaskConfig) {
+        if (!canConfigureRouting(tenant.id)) return
         viewModelScope.launch {
             _actionMessage.value = "Menguji ${config.providerLabel} • ${config.modelId}..."
+            if (config.task == "audio_transcription") {
+                val connectionId = config.connectionId.ifBlank { ProviderPresets.BUILT_IN_STT_ID }
+                val connection = connections.value.firstOrNull { it.id == connectionId && it.kind == "stt" && it.enabled }
+                if (connection == null || (connection.allAvailableModels.isNotEmpty() &&
+                        config.modelId !in connection.allAvailableModels)) {
+                    _actionMessage.value = "Provider atau model transkripsi yang dipilih tidak tersedia."
+                    return@launch
+                }
+                testCustomConnection(connection)
+                return@launch
+            }
             aiService.runSinglePlayground(
                 modelId = config.modelId,
                 systemPrompt = config.systemPromptOverride.ifBlank {
@@ -452,7 +469,8 @@ class WorkspaceViewModel(
                 inputText = "Pembicara 1: Kita sepakat target rilis aplikasi adalah tanggal 15 bulan depan.",
                 temperature = config.temperature.toFloat(),
                 prices = modelPrices.value,
-                connectionId = config.connectionId.ifBlank { ProviderPresets.BUILT_IN_AI_ID }
+                connectionId = config.connectionId.ifBlank { ProviderPresets.BUILT_IN_AI_ID },
+                taskName = config.task
             ).onSuccess { res ->
                 _connectionHealthy.value = true
                 tenantRepo.recordUsageLog(
@@ -472,6 +490,14 @@ class WorkspaceViewModel(
                 _actionMessage.value = toFriendlyIndonesianError(err)
             }
         }
+    }
+
+    private fun canConfigureRouting(tenantId: String): Boolean {
+        val snapshot = (workspaceState.value as? UiState.Success)?.data
+        if (snapshot?.activeTenant?.id == tenantId && snapshot.isAdminOrOwner &&
+            Firebase.auth.currentUser?.uid == currentUserId) return true
+        _actionMessage.value = "Routing AI hanya bisa diatur oleh admin atau pemilik workspace aktif."
+        return false
     }
 
     fun checkAiHealth() {

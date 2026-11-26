@@ -5,6 +5,7 @@ import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import java.util.UUID
 
 /** Persistent filename identity and permanent master-audio location. */
 object RecordingFileIdentity {
@@ -18,11 +19,29 @@ object RecordingFileIdentity {
         val date = SimpleDateFormat("ddMMyy", Locale.US).format(now)
         val global = prefs.getInt(GLOBAL_KEY, 0) + 1
         val daily = if (prefs.getString(DATE_KEY, "") == date) prefs.getInt(DAILY_KEY, 0) + 1 else 1
-        val fileName = "Rec%04d%s-%02d.acc".format(Locale.US, global, date, daily)
+        val fileName = "Rec%04d%s-%02d.m4a".format(Locale.US, global, date, daily)
         check(prefs.edit().putInt(GLOBAL_KEY, global).putInt(DAILY_KEY, daily).putString(DATE_KEY, date).commit()) { "Gagal menyimpan counter rekaman" }
         return Identity(global, date, daily, fileName)
     }
-    fun masterDirectory(context: Context): File = File(context.filesDir, "recordings/masters").apply {
-        check(isDirectory || mkdirs()) { "Tidak dapat membuat folder rekaman utama" }
+    @Suppress("DEPRECATION") // Use Android's app-owned, user-visible media directory.
+    internal fun saveMaster(context: Context, segments: List<File>, fileName: String): Result<File> {
+        val media = runCatching { context.externalMediaDirs.firstOrNull() }.getOrNull()
+            ?.let { File(it, "NotulenKu/Meet") }
+        val privateDir = File(context.filesDir, "recordings/masters")
+        var lastError: Throwable? = null
+        for (dir in listOfNotNull(media, privateDir)) {
+            val requested = File(dir, fileName)
+            val destination = if (requested.exists()) {
+                File(dir, "${requested.nameWithoutExtension}-${UUID.randomUUID()}.m4a")
+            } else requested
+            val result = runCatching {
+                check(dir.isDirectory || dir.mkdirs()) { "Tidak dapat membuat folder rekaman utama" }
+                AudioSegmenter.mergeM4aSegments(segments, destination).getOrThrow()
+            }
+            if (result.isSuccess) return result
+            lastError = result.exceptionOrNull()
+            destination.delete()
+        }
+        return Result.failure(lastError ?: IllegalStateException("Tidak dapat menyimpan rekaman utama"))
     }
 }
