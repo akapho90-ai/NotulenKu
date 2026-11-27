@@ -12,6 +12,7 @@ import com.example.data.ai.AiCallMeta
 import com.example.data.ai.AiService
 import com.example.data.ai.SummaryAndActionResult
 import com.example.data.ai.TranscriptionResult
+import com.example.data.ai.SttAudioTiming
 import com.example.data.model.ActionItem
 import com.example.data.model.Meeting
 import com.example.data.model.ModelPrice
@@ -185,7 +186,8 @@ private class FakeAiService : AiService() {
         mimeType: String,
         config: TaskConfig?,
         prices: List<ModelPrice>,
-        preferredLanguage: String
+        preferredLanguage: String,
+        timing: SttAudioTiming?
     ): Result<TranscriptionResult> {
         sttCalls++
         return Result.success(

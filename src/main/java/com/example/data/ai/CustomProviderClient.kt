@@ -348,7 +348,8 @@ class CustomProviderClient {
         mimeType: String,
         language: String,
         diarize: Boolean,
-        timeoutSec: Int
+        timeoutSec: Int,
+        timing: SttAudioTiming? = null
     ): Result<ProviderSttResponse> = withContext(Dispatchers.IO) {
         val base = normalizeBaseUrl(connection)
         if (base.isBlank() || apiKey.isBlank()) {
@@ -373,7 +374,7 @@ class CustomProviderClient {
                         val json = JSONObject(raw)
                         val results = json.optJSONObject("results")
                         val utterances = results?.optJSONArray("utterances")
-                        val segments = mutableListOf<TranscriptSegment>()
+                        val segments = mutableListOf<SttSegment>()
                         if (utterances != null && utterances.length() > 0) {
                             for (i in 0 until utterances.length()) {
                                 val u = utterances.getJSONObject(i)
@@ -381,12 +382,7 @@ class CustomProviderClient {
                                 val txt = u.optString("transcript").trim()
                                 if (txt.isNotBlank()) {
                                     segments.add(
-                                        TranscriptSegment(
-                                            pembicara = "Pembicara $spkIdx",
-                                            mulaiDetik = u.requiredTimestamp("start"),
-                                            selesaiDetik = u.requiredTimestamp("end"),
-                                            teks = txt
-                                        )
+                                        SttSegment("Pembicara $spkIdx", u.sttTimestampMs("start"), u.sttTimestampMs("end"), txt)
                                     )
                                 }
                             }
@@ -397,15 +393,18 @@ class CustomProviderClient {
                                 ?.optJSONObject(0)
                                 ?.optString("transcript")?.trim().orEmpty()
                             if (altText.isNotBlank()) {
-                                segments.add(TranscriptSegment("Pembicara 1", 0L, 0L, altText))
+                                segments.add(SttSegment("Pembicara 1", 0.0, 0.0, altText))
                             }
                         }
-                        Result.success(ProviderSttResponse(lang, segments, System.currentTimeMillis() - start))
+                        Result.success(ProviderSttResponse(
+                            lang, normalizeSttSegments(segments, timing, SttTimeline.CHUNK),
+                            System.currentTimeMillis() - start
+                        ))
                     }
                 }
                 "google_stt" -> {
                     val b64 = android.util.Base64.encodeToString(audioBytes, android.util.Base64.NO_WRAP)
-                    val promptText = "Transkripsikan rekaman audio dalam bahasa $lang. Ukur waktu dalam detik dari awal berkas audio terlampir (detik 0) dan jangan melebihi durasinya. Kembalikan JSON {\"bahasa\":\"$lang\",\"segmen\":[{\"pembicara\":\"Pembicara 1\",\"mulaiDetik\":0,\"selesaiDetik\":10,\"teks\":\"...\"}]}."
+                    val promptText = "Transkripsikan rekaman audio dalam bahasa $lang. Ukur waktu dalam detik dari awal berkas audio terlampir (detik 0) dan jangan melebihi durasinya. Sertakan timestampReference=chunk dan timestampUnit=seconds. Kembalikan JSON {\"bahasa\":\"$lang\",\"segmen\":[{\"pembicara\":\"Pembicara 1\",\"mulaiDetik\":0,\"selesaiDetik\":10,\"teks\":\"...\"}]}."
                     val body = JSONObject().apply {
                         put("contents", JSONArray().put(JSONObject().apply {
                             put("parts", JSONArray().apply {
@@ -430,26 +429,8 @@ class CustomProviderClient {
                         val textJson = root.optJSONArray("candidates")
                             ?.optJSONObject(0)?.optJSONObject("content")
                             ?.optJSONArray("parts")?.optJSONObject(0)?.optString("text").orEmpty()
-                        val parsed = JSONObject(extractJsonObject(textJson))
-                        val arr = parsed.optJSONArray("segmen")
-                        val segments = mutableListOf<TranscriptSegment>()
-                        if (arr != null) {
-                            for (i in 0 until arr.length()) {
-                                val o = arr.getJSONObject(i)
-                                val t = o.optString("teks").trim()
-                                if (t.isNotBlank()) {
-                                    segments.add(
-                                        TranscriptSegment(
-                                            pembicara = o.optString("pembicara", "Pembicara 1"),
-                                            mulaiDetik = o.requiredTimestamp("mulaiDetik"),
-                                            selesaiDetik = o.requiredTimestamp("selesaiDetik"),
-                                            teks = t
-                                        )
-                                    )
-                                }
-                            }
-                        }
-                        Result.success(ProviderSttResponse(parsed.optString("bahasa", lang), segments, System.currentTimeMillis() - start))
+                        val (parsedLanguage, segments) = parseSttJson(textJson, lang, timing)
+                        Result.success(ProviderSttResponse(parsedLanguage, segments, System.currentTimeMillis() - start))
                     }
                 }
                 else -> {
@@ -479,18 +460,16 @@ class CustomProviderClient {
                         if (!resp.isSuccessful) return@withContext Result.failure(ProviderHttpException(resp.code, friendlyHttpError(resp.code, raw)))
                         val json = JSONObject(raw)
                         val segArr = json.optJSONArray("segments")
-                        val segments = mutableListOf<TranscriptSegment>()
+                        val segments = mutableListOf<SttSegment>()
                         if (segArr != null && segArr.length() > 0) {
                             for (i in 0 until segArr.length()) {
                                 val s = segArr.getJSONObject(i)
                                 val t = s.optString("text").trim()
                                 if (t.isNotBlank()) {
                                     segments.add(
-                                        TranscriptSegment(
-                                            pembicara = s.optString("speaker", "Pembicara 1").ifBlank { "Pembicara 1" },
-                                            mulaiDetik = s.requiredTimestamp("start"),
-                                            selesaiDetik = s.requiredTimestamp("end"),
-                                            teks = t
+                                        SttSegment(
+                                            s.optString("speaker", "Pembicara 1").ifBlank { "Pembicara 1" },
+                                            s.sttTimestampMs("start"), s.sttTimestampMs("end"), t
                                         )
                                     )
                                 }
@@ -498,13 +477,13 @@ class CustomProviderClient {
                         } else {
                             val txt = json.optString("text").trim()
                             if (txt.isNotBlank()) {
-                                segments.add(TranscriptSegment("Pembicara 1", 0L, 0L, txt))
+                                segments.add(SttSegment("Pembicara 1", 0.0, 0.0, txt))
                             }
                         }
                         Result.success(
                             ProviderSttResponse(
                                 bahasa = json.optString("language", lang).ifBlank { lang },
-                                segments = segments,
+                                segments = normalizeSttSegments(segments, timing, SttTimeline.CHUNK),
                                 latencyMs = System.currentTimeMillis() - start
                             )
                         )
@@ -547,12 +526,4 @@ class CustomProviderClient {
             return if (start >= 0 && end > start) trimmed.substring(start, end + 1) else "{}"
         }
     }
-}
-
-internal fun JSONObject.requiredTimestamp(key: String): Long {
-    val value = optDouble(key, Double.NaN)
-    require(value.isFinite() && value >= 0 && value < Long.MAX_VALUE.toDouble()) {
-        "Stempel waktu transkripsi tidak valid."
-    }
-    return value.toLong()
 }

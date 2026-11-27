@@ -101,32 +101,6 @@ object AudioSegmenter {
         return merged.sortedBy { it.mulaiDetik }
     }
 
-    internal fun relativeChunkTimestamps(
-        segments: List<TranscriptSegment>,
-        startOffsetSec: Long,
-        endOffsetSec: Long
-    ): List<TranscriptSegment> {
-        require(segments.isNotEmpty()) { "Respons transkripsi tidak memuat ucapan." }
-        require(segments.all { it.teks.isNotBlank() && it.mulaiDetik >= 0 && it.selesaiDetik >= it.mulaiDetik }) {
-            "Segmen transkripsi berisi teks atau stempel waktu yang tidak valid."
-        }
-        require(startOffsetSec in 0L..endOffsetSec)
-        val duration = endOffsetSec - startOffsetSec
-        val tolerance = 2L
-        if (segments.all { it.selesaiDetik <= duration.coerceAtMost(Long.MAX_VALUE - tolerance) + tolerance }) {
-            return segments
-        }
-        val absoluteEnd = endOffsetSec.coerceAtMost(Long.MAX_VALUE - tolerance) + tolerance
-        // Only convert when the relative interpretation failed and every row fits the same
-        // absolute window. In the overlap between the two ranges, keep the specified convention.
-        require(startOffsetSec > 0 && segments.all {
-            it.mulaiDetik >= startOffsetSec && it.selesaiDetik <= absoluteEnd
-        }) { "Stempel waktu transkripsi berada di luar rentang bagian audio." }
-        return segments.map {
-            it.copy(mulaiDetik = it.mulaiDetik - startOffsetSec, selesaiDetik = it.selesaiDetik - startOffsetSec)
-        }
-    }
-
     private val word = Regex("[\\p{L}\\p{M}\\p{N}]+")
 
     private fun normalizeWord(value: String): String =
@@ -432,7 +406,7 @@ object AudioSegmenter {
 
     fun detectDurationSeconds(file: File): Long = detectDurationMillis(file) / 1_000L
 
-    private fun detectDurationMillis(file: File): Long {
+    internal fun detectDurationMillis(file: File): Long {
         val retriever = MediaMetadataRetriever()
         return try {
             retriever.setDataSource(file.absolutePath)

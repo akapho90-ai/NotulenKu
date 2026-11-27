@@ -6,6 +6,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.audio.AudioSegmenter
 import com.example.audio.ProcessingChunkStorage
+import com.example.data.ai.SttAudioTiming
 import com.example.audio.PreparedAudioChunk
 import com.example.core.AppConstants
 import com.example.core.toFriendlyIndonesianError
@@ -585,7 +586,7 @@ class MeetingViewModel(
                 )
 
                 val chunkFile = File(chunk.filePath)
-                val bytes = withContext(processingIoDispatcher) {
+                val payload = withContext(processingIoDispatcher) {
                     runCatching {
                         val canonical = chunkFile.canonicalFile
                         val managed = if (chunk.isTempChunk && appContext != null) {
@@ -593,14 +594,17 @@ class MeetingViewModel(
                         } else canonical == originalFile.canonicalFile
                         val length = canonical.length()
                         if (!managed || length !in 1L..AudioSegmenter.MAX_DIRECT_UPLOAD_BYTES) return@runCatching null
-                        java.io.DataInputStream(canonical.inputStream()).use { input ->
+                        val audioBytes = java.io.DataInputStream(canonical.inputStream()).use { input ->
                             val bytes = ByteArray(length.toInt())
                             input.readFully(bytes)
                             bytes.takeIf { input.read() == -1 }
-                        }
+                        } ?: return@runCatching null
+                        val durationMs = AudioSegmenter.detectDurationMillis(canonical).takeIf { it > 0 }
+                            ?: ((chunk.endOffsetSec - chunk.startOffsetSec).coerceIn(1L, Long.MAX_VALUE / 1000L) * 1000L)
+                        audioBytes to SttAudioTiming(chunk.startOffsetSec, durationMs)
                     }.getOrNull()
                 }
-                if (bytes == null || bytes.isEmpty()) {
+                if (payload == null) {
                     val errMsg = "Bagian audio ${i + 1}/$totalChunks tidak dapat dibaca. Rekaman asli tetap aman."
                     updatedChunks[i] = chunk.copy(status = ChunkStatus.FAILED, errorMessage = errMsg)
                     currentJob = currentJob.copy(chunks = updatedChunks, lastError = errMsg)
@@ -618,18 +622,15 @@ class MeetingViewModel(
                 }
 
                 val sttResult = aiService.transcribeAudio(
-                    audioBytes = bytes,
+                    audioBytes = payload.first,
                     mimeType = chunk.mimeType,
                     config = sttConfig,
                     prices = prices,
-                    preferredLanguage = currentJob.preferredLanguage
+                    preferredLanguage = currentJob.preferredLanguage,
+                    timing = payload.second
                 )
 
-                val trans = sttResult.mapCatching { result ->
-                    result.copy(segments = AudioSegmenter.relativeChunkTimestamps(
-                        result.segments, chunk.startOffsetSec, chunk.endOffsetSec
-                    ))
-                }.getOrElse { err ->
+                val trans = sttResult.getOrElse { err ->
                     if (err is CancellationException) throw err
                     val errMsg = toFriendlyIndonesianError(err)
                     val fullErr = if (totalChunks > 1) {

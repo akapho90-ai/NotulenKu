@@ -21,7 +21,7 @@ jobs:
     timeout-minutes: 35
     env:
       FIREBASE_PROJECT_ID: gen-lang-client-0830960267
-      ANDROID_APP_ID: com.aistudio.notulenrapat.kxmpzq
+      ANDROID_APP_ID: com.notulenrapat.android
       SIGNING_SHA1: 20:b5:85:e1:70:90:ec:db:16:0a:8b:8c:27:02:e6:59:ff:99:9c:b2
 
     steps:
@@ -67,6 +67,13 @@ jobs:
             awk '$1 == "SHA1:" { print tolower($2) }')
           if [[ "$certificate_sha1" != "$SIGNING_SHA1" ]]; then
             echo '::error::The debug keystore does not match the registered NotulenKu SHA-1.'
+            exit 1
+          fi
+
+          if ! jq -e --arg package "$ANDROID_APP_ID" \
+              'any(.client[]?; .client_info.android_client_info.package_name == $package)' \
+              google-services.json >/dev/null; then
+            echo "::error::GOOGLE_SERVICES_JSON_BASE64 must contain the Firebase Android client for $ANDROID_APP_ID."
             exit 1
           fi
 

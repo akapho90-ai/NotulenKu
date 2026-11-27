@@ -7,6 +7,7 @@ import com.example.audio.ProcessingChunkStorage
 import com.example.audio.RecordingFileIdentity
 import com.example.data.ai.AiService
 import com.example.data.ai.MeetingBackendAiClient
+import com.example.data.ai.SttAudioTiming
 import com.example.data.repository.LocalProcessingCheckpointStore
 import com.example.data.repository.LocalProcessingJob
 import org.junit.Assert.assertEquals
@@ -81,25 +82,27 @@ class Stage2ProcessingInstrumentedTest {
                 }
             }
             val bytes = chunks[1].file.readBytes()
+            val timing = SttAudioTiming(178, AudioSegmenter.detectDurationMillis(chunks[1].file))
+            assertTrue(timing.durationMs in 179_000L..181_000L)
             val client = OkHttpClient.Builder().addInterceptor { chain ->
                 val body = Buffer()
                 chain.request().body!!.writeTo(body)
                 val data = JSONObject(body.readUtf8()).getJSONObject("data")
                 assertEquals("audio_transcription", data.getString("task"))
                 assertEquals("audio/mp4", data.getString("mimeType"))
-                assertTrue(data.getString("systemPrompt").contains("detik 0 adalah awal berkas audio terlampir"))
+                assertTrue(data.getString("systemPrompt").contains("${timing.durationMs} milidetik"))
                 val decoded = android.util.Base64.decode(data.getString("audioBase64"), android.util.Base64.DEFAULT)
                 org.junit.Assert.assertArrayEquals(bytes, decoded)
                 val result = JSONObject().put("result", JSONObject().put("text",
-                    """{"bahasa":"id","segmen":[{"mulaiDetik":190,"selesaiDetik":191,"teks":"Contoh"}]}"""))
+                    """{"bahasa":"id","timestampReference":"recording","segmen":[{"mulaiDetik":"03:10.250","selesaiDetik":"03:11","teks":"Contoh"}]}"""))
                 Response.Builder().request(chain.request()).protocol(Protocol.HTTP_1_1).code(200).message("OK")
                     .body(result.toString().toResponseBody("application/json".toMediaType())).build()
             }.build()
             val ai = AiService(backendAiClient = MeetingBackendAiClient(
                 baseUrl = "https://notulenku.local.invalid", tokenProvider = { "test-token" }, baseClient = client
             ))
-            val reply = ai.transcribeAudio(bytes, "audio/mp4", null, emptyList()).getOrThrow()
-            val segment = AudioSegmenter.relativeChunkTimestamps(reply.segments, 178, 358).single()
+            val reply = ai.transcribeAudio(bytes, "audio/mp4", null, emptyList(), timing = timing).getOrThrow()
+            val segment = reply.segments.single()
             assertEquals("Contoh", segment.teks)
             assertEquals(12L, segment.mulaiDetik)
 

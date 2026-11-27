@@ -11,6 +11,8 @@ import com.example.data.ai.AiService
 import com.example.data.ai.MeetingBackendAiClient
 import com.example.data.ai.SummaryAndActionResult
 import com.example.data.ai.TranscriptionResult
+import com.example.data.ai.SttAudioTiming
+import com.example.data.ai.parseSttJson
 import com.example.data.auth.isValidGoogleWebClientId
 import com.example.data.auth.mapGoogleSignInError
 import com.example.data.model.ActionItem
@@ -143,7 +145,8 @@ private class ScriptedAiService : AiService() {
         mimeType: String,
         config: TaskConfig?,
         prices: List<ModelPrice>,
-        preferredLanguage: String
+        preferredLanguage: String,
+        timing: SttAudioTiming?
     ): Result<TranscriptionResult> {
         sttCalls++
         if (failSttOnCall == sttCalls) {
@@ -151,10 +154,12 @@ private class ScriptedAiService : AiService() {
         }
         val tag = String(audioBytes)
         val start = if (tag == "CHUNK_2") 191L else 0L
+        val raw = """{"segmen":[{"mulaiDetik":$start,"selesaiDetik":${start + 12L},"teks":"Ucapan dari $tag"}]}"""
+        val (_, parsedSegments) = parseSttJson(raw, "id", timing)
         return Result.success(
             TranscriptionResult(
                 bahasa = "id",
-                segments = listOf(TranscriptSegment("Pembicara 1", start, start + 12L, "Ucapan dari $tag")),
+                segments = parsedSegments,
                 meta = AiCallMeta("gemini/gemini-3.5-flash-lite", 10, 20, 80, 0.0, providerLabel = "SumoPod AI")
             )
         )
@@ -335,6 +340,7 @@ class NotulenKuRevisionTest {
         assertEquals(1, ai.summaryCalls)
         val retryJob = store.loadJob("uid_chunk_user", meetingId)!!
         assertEquals(13L, retryJob.chunks[1].segments.single().mulaiDetik)
+        assertEquals(191L, retryJob.mergedSegments.last().mulaiDetik)
         assertEquals(3, vm.processingState.value?.stepIndex)
         assertTrue(vm.processingState.value?.canRetryProcessing == true)
 
@@ -394,16 +400,27 @@ class NotulenKuRevisionTest {
     }
 
     @Test
-    fun sttTimestampNormalizationRejectsEmptyAndMixedTimelineResponses() {
-        val local = TranscriptSegment("Pembicara 1", 2, 8, "Teks")
-        val absolute = local.copy(mulaiDetik = 192, selesaiDetik = 198)
-        assertEquals(listOf(local), AudioSegmenter.relativeChunkTimestamps(listOf(local), 178, 358))
-        assertEquals(14L, AudioSegmenter.relativeChunkTimestamps(listOf(absolute), 178, 358).single().mulaiDetik)
-        assertTrue(runCatching { AudioSegmenter.relativeChunkTimestamps(emptyList(), 178, 358) }.isFailure)
-        assertTrue(runCatching { AudioSegmenter.relativeChunkTimestamps(listOf(local, absolute), 178, 358) }.isFailure)
-        assertTrue(runCatching {
-            AudioSegmenter.relativeChunkTimestamps(listOf(absolute.copy(selesaiDetik = 400)), 178, 358)
-        }.isFailure)
+    fun sttTimestampsValidateAgainstFileDurationBeforeRoundingAndUseOneTimeline() {
+        fun parse(rows: String, timing: SttAudioTiming, metadata: String = "") =
+            parseSttJson("""{$metadata"segmen":[$rows]}""", "id", timing).second
+        val first = SttAudioTiming(0, 179_964)
+        val second = SttAudioTiming(178, 179_964)
+        val local = """{"mulaiDetik":"02:57.250","selesaiDetik":"00:03:00","teks":"Teks"}"""
+        val absolute = """{"mulaiDetik":192.875,"selesaiDetik":"198.250","teks":"Teks"}"""
+        val millis = """{"mulaiDetik":177250,"selesaiDetik":179900,"teks":"Teks"}"""
+        assertEquals(177L to 179L, parse(local, first).single().run { mulaiDetik to selesaiDetik })
+        assertEquals(14L to 20L, parse(absolute, second).single().run { mulaiDetik to selesaiDetik })
+        assertEquals(177L, parse(millis, first, """"timestampUnit":"ms",""").single().mulaiDetik)
+        assertEquals(1L, parse(
+            """{"mulaiDetik":179,"selesaiDetik":179.5,"teks":"Teks"}""",
+            second, """"timestampReference":"recording","""
+        ).single().mulaiDetik)
+        assertTrue(runCatching { parse("", first) }.isFailure)
+        assertTrue(runCatching { parse("""{"mulaiDetik":1,"selesaiDetik":2,"teks":"Lokal"},$absolute""", second) }.isFailure)
+        assertTrue(runCatching { parse(absolute, second, """"timestampReference":"chunk",""") }.isFailure)
+        assertTrue(runCatching { parse(millis, first) }.isFailure)
+        assertTrue(runCatching { parse("""{"mulaiDetik":179.98,"selesaiDetik":180,"teks":"Lewat"}""", first) }.isFailure)
+        assertTrue(runCatching { parse("""{"mulaiDetik":2,"selesaiDetik":182,"teks":"Lewat"}""", first) }.isFailure)
     }
 
     @Test
@@ -448,19 +465,19 @@ class NotulenKuRevisionTest {
 
     @Test
     fun transcriptionRejectsPartialOrMalformedSegments() {
-        val ai = AiService()
         val valid = """{"pembicara":"A","mulaiDetik":0,"selesaiDetik":2,"teks":"Halo"}"""
         val invalidRows = listOf(
             "null",
             """{"mulaiDetik":-1,"selesaiDetik":3,"teks":"invalid"}""",
             """{"mulaiDetik":3,"selesaiDetik":2,"teks":"invalid"}""",
+            """{"mulaiDetik":2.9,"selesaiDetik":2.1,"teks":"invalid"}""",
             """{"mulaiDetik":2,"selesaiDetik":3,"teks":"  "}""",
             """{"mulaiDetik":2,"teks":"waktu akhir hilang"}"""
         )
         invalidRows.forEach { row ->
-            assertTrue(runCatching { ai.parseTranscriptionJson("""{"segmen":[$valid,$row]}""", "id") }.isFailure)
+            assertTrue(runCatching { parseSttJson("""{"segmen":[$valid,$row]}""", "id") }.isFailure)
         }
-        assertTrue(runCatching { ai.parseTranscriptionJson("""{"segmen":[]}""", "id") }.isFailure)
+        assertTrue(runCatching { parseSttJson("""{"segmen":[]}""", "id") }.isFailure)
     }
 
     @Test

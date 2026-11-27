@@ -47,13 +47,13 @@ supabase functions deploy meeting-api \
 ## 2. Konfigurasi Login Google, `google-services.json`, & Keystore Tetap
 
 ### Identitas Proyek (Jangan Diubah)
-- Android Package Name: `com.aistudio.notulenrapat.kxmpzq`
+- Android Package Name: `com.notulenrapat.android`
 - Firebase Project ID: `gen-lang-client-0830960267`
 - Firebase Project Number: `699450924977`
 
 ### Penyebab Umum Gagal Login Google di Perangkat
 1. `app/google-services.json` tidak sinkron atau tidak memiliki `oauth_client` bertipe `3` (Web Client ID) sehingga `default_web_client_id` kosong.
-2. Sidik jari **SHA-1** dan **SHA-256** dari keystore yang dipakai menandatangani APK (Debug maupun Release/Upload) belum didaftarkan di **Firebase Console → Project Settings → Your apps → Android (`com.aistudio.notulenrapat.kxmpzq`)**.
+2. Sidik jari **SHA-1** dan **SHA-256** dari keystore yang dipakai menandatangani APK (Debug maupun Release/Upload) belum didaftarkan di **Firebase Console → Project Settings → Your apps → Android (`com.notulenrapat.android`)**.
 3. Keystore rilis berubah-ubah antar build CI/CD.
 
 ### Fingerprint `debug.keystore` yang Teramati di Workspace Saat Ini
@@ -70,7 +70,7 @@ supabase functions deploy meeting-api \
    ```bash
    keytool -list -v -keystore upload-keystore.jks -alias upload
    ```
-3. Daftarkan **SHA-1** dan **SHA-256** (baik debug maupun release/upload, serta Google Play App Signing jika memakai Play Console) di **Firebase Console → Project Settings → Android App (`com.aistudio.notulenrapat.kxmpzq`)**.
+3. Daftarkan **SHA-1** dan **SHA-256** (baik debug maupun release/upload, serta Google Play App Signing jika memakai Play Console) di **Firebase Console → Project Settings → Android App (`com.notulenrapat.android`)**.
 4. Pastikan metode **Google** aktif di **Firebase Console → Authentication → Sign-in method**.
 5. Unduh ulang `google-services.json` terbaru dari Firebase Console setelah menambahkan SHA-1/SHA-256, lalu pastikan nilai `default_web_client_id` tergenerate saat build.
 
