@@ -3,6 +3,7 @@ package com.example
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.example.audio.AudioSegmenter
+import com.example.audio.ProcessingChunkStorage
 import com.example.audio.RecordingFileIdentity
 import com.example.data.ai.AiService
 import com.example.data.ai.MeetingBackendAiClient
@@ -53,7 +54,9 @@ class Stage2ProcessingInstrumentedTest {
     @Test fun defaultThreeMinuteChunksReachSttAndCanBeRebuiltWithoutDeletingMaster() = runBlocking {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val context = instrumentation.targetContext
-        val source = File.createTempFile("stage2_long_", ".m4a", context.cacheDir)
+        val meet = RecordingFileIdentity.mediaFolder(context, "Meet")!!
+        assertTrue(meet.isDirectory || meet.mkdirs())
+        val source = File.createTempFile("stage2_long_", ".m4a", meet)
         val id = "stage2-long-${System.currentTimeMillis()}"
         try {
             instrumentation.context.assets.open("synthetic-aac-370s.m4a").use { input ->
@@ -66,7 +69,7 @@ class Stage2ProcessingInstrumentedTest {
             assertEquals(chunks.indices.toList(), chunks.map { it.index })
             chunks.forEach { chunk ->
                 assertTrue(chunk.isTempChunk)
-                assertEquals(File(context.cacheDir, "processing_audio_chunks/$id").canonicalFile, chunk.file.parentFile?.canonicalFile)
+                assertEquals(File(RecordingFileIdentity.mediaFolder(context, "Chunks")!!, id).canonicalFile, chunk.file.parentFile?.canonicalFile)
                 val extractor = android.media.MediaExtractor()
                 try {
                     extractor.setDataSource(chunk.file.absolutePath)
@@ -84,26 +87,52 @@ class Stage2ProcessingInstrumentedTest {
                 val data = JSONObject(body.readUtf8()).getJSONObject("data")
                 assertEquals("audio_transcription", data.getString("task"))
                 assertEquals("audio/mp4", data.getString("mimeType"))
+                assertTrue(data.getString("systemPrompt").contains("detik 0 adalah awal berkas audio terlampir"))
                 val decoded = android.util.Base64.decode(data.getString("audioBase64"), android.util.Base64.DEFAULT)
                 org.junit.Assert.assertArrayEquals(bytes, decoded)
                 val result = JSONObject().put("result", JSONObject().put("text",
-                    """{"bahasa":"id","segmen":[{"mulaiDetik":0,"selesaiDetik":1,"teks":"Contoh"}]}"""))
+                    """{"bahasa":"id","segmen":[{"mulaiDetik":190,"selesaiDetik":191,"teks":"Contoh"}]}"""))
                 Response.Builder().request(chain.request()).protocol(Protocol.HTTP_1_1).code(200).message("OK")
                     .body(result.toString().toResponseBody("application/json".toMediaType())).build()
             }.build()
             val ai = AiService(backendAiClient = MeetingBackendAiClient(
                 baseUrl = "https://notulenku.local.invalid", tokenProvider = { "test-token" }, baseClient = client
             ))
-            assertEquals("Contoh", ai.transcribeAudio(bytes, "audio/mp4", null, emptyList()).getOrThrow().segments.single().teks)
+            val reply = ai.transcribeAudio(bytes, "audio/mp4", null, emptyList()).getOrThrow()
+            val segment = AudioSegmenter.relativeChunkTimestamps(reply.segments, 178, 358).single()
+            assertEquals("Contoh", segment.teks)
+            assertEquals(12L, segment.mulaiDetik)
 
-            AudioSegmenter.cleanupTempChunkDir(context, id, source.absolutePath)
-            assertTrue(chunks.none { it.file.exists() })
+            val preserved = chunks[0].file
+            val preservedTime = preserved.lastModified()
+            val expired = chunks[1].file
+            assertTrue(expired.setLastModified(System.currentTimeMillis() - ProcessingChunkStorage.RETENTION_MS - 60_000L))
+            ProcessingChunkStorage.cleanupExpired(context)
+            assertTrue(preserved.exists() && !expired.exists())
             val rebuilt = AudioSegmenter.prepareAudioChunks(context, id, source, "audio/mp4", 370).getOrThrow()
             assertEquals(windows, rebuilt.map { it.startOffsetSec to it.endOffsetSec })
             assertEquals(chunks.map { it.file }, rebuilt.map { it.file })
+            assertEquals(preservedTime, preserved.lastModified())
+            assertTrue(rebuilt.all { it.file.isFile })
             assertEquals(originalLength, source.length())
+
+            val unavailableMedia = File.createTempFile("unavailable_media_", ".tmp", context.cacheDir)
+            val fallback = object : android.content.ContextWrapper(context) {
+                override fun getExternalMediaDirs(): Array<File> = arrayOf(unavailableMedia)
+            }
+            val fallbackId = "$id-fallback"
+            try {
+                val privateChunks = AudioSegmenter.prepareAudioChunks(fallback, fallbackId, source, "audio/mp4", 370)
+                    .getOrThrow()
+                val expected = File(context.filesDir, "processing_audio_chunks/$fallbackId").canonicalFile
+                assertTrue(privateChunks.size == 3 && privateChunks.all { it.file.parentFile == expected })
+                assertEquals(originalLength, source.length())
+            } finally {
+                ProcessingChunkStorage.files(fallback, fallbackId, 0).forEach { it.parentFile?.deleteRecursively() }
+                unavailableMedia.delete()
+            }
         } finally {
-            AudioSegmenter.cleanupTempChunkDir(context, id, source.absolutePath)
+            ProcessingChunkStorage.files(context, id, 0).forEach { it.parentFile?.deleteRecursively() }
             source.delete()
         }
     }

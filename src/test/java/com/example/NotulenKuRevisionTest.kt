@@ -5,6 +5,7 @@ import androidx.credentials.exceptions.GetCredentialCancellationException
 import androidx.credentials.exceptions.NoCredentialException
 import androidx.test.core.app.ApplicationProvider
 import com.example.audio.AudioSegmenter
+import com.example.audio.ProcessingChunkStorage
 import com.example.data.ai.AiCallMeta
 import com.example.data.ai.AiService
 import com.example.data.ai.MeetingBackendAiClient
@@ -149,10 +150,11 @@ private class ScriptedAiService : AiService() {
             return Result.failure(IllegalStateException("Simulasi timeout chunk $sttCalls"))
         }
         val tag = String(audioBytes)
+        val start = if (tag == "CHUNK_2") 191L else 0L
         return Result.success(
             TranscriptionResult(
                 bahasa = "id",
-                segments = listOf(TranscriptSegment("Pembicara 1", 0, 12, "Ucapan dari $tag")),
+                segments = listOf(TranscriptSegment("Pembicara 1", start, start + 12L, "Ucapan dari $tag")),
                 meta = AiCallMeta("gemini/gemini-3.5-flash-lite", 10, 20, 80, 0.0, providerLabel = "SumoPod AI")
             )
         )
@@ -281,25 +283,25 @@ class NotulenKuRevisionTest {
             writeBytes("ORIGINAL_AUDIO".toByteArray())
         }
         val meetingId = "44444444-4444-4444-8444-444444444444"
-        val chunk1File = AudioSegmenter.processingChunkFile(context, meetingId, 0).apply {
+        val chunk1File = ProcessingChunkStorage.files(context, meetingId, 0).first().apply {
             parentFile!!.mkdirs()
             writeBytes("CHUNK_1".toByteArray())
         }
-        val chunk2File = AudioSegmenter.processingChunkFile(context, meetingId, 1).apply {
+        val chunk2File = ProcessingChunkStorage.files(context, meetingId, 1).first().apply {
             writeBytes("CHUNK_2".toByteArray())
         }
 
         val preChunkedJob = LocalProcessingJob(
             meetingId = meetingId,
             ownerUserId = "uid_chunk_user",
-            judul = "Rapat Panjang 2 Jam",
+            judul = "Rapat Dua Bagian",
             originalAudioPath = originalAudio.absolutePath,
             mimeType = "audio/mp4",
-            durasiDetik = 1200L,
+            durasiDetik = 358L,
             ukuranBytes = originalAudio.length(),
             chunks = listOf(
-                AudioChunkCheckpoint(0, 0L, 600L, chunk1File.absolutePath, "audio/mp4", isTempChunk = true, status = ChunkStatus.PENDING),
-                AudioChunkCheckpoint(1, 590L, 1200L, chunk2File.absolutePath, "audio/mp4", isTempChunk = true, status = ChunkStatus.PENDING)
+                AudioChunkCheckpoint(0, 0L, 180L, chunk1File.absolutePath, "audio/mp4", isTempChunk = true, status = ChunkStatus.PENDING),
+                AudioChunkCheckpoint(1, 178L, 358L, chunk2File.absolutePath, "audio/mp4", isTempChunk = true, status = ChunkStatus.PENDING)
             )
         )
         store.saveJob(preChunkedJob)
@@ -322,12 +324,17 @@ class NotulenKuRevisionTest {
         assertEquals(2, vm.processingState.value?.totalChunks)
         assertTrue(vm.processingState.value?.canRetryProcessing == true)
         assertTrue("Original audio must NEVER be deleted on failure", originalAudio.exists())
+        assertTrue(chunk1File.exists() && chunk2File.exists())
+        val failedJob = store.loadJob("uid_chunk_user", meetingId)!!
+        assertEquals(listOf(ChunkStatus.DONE, ChunkStatus.FAILED), failedJob.chunks.map { it.status })
 
         // Attempt 2: retries ONLY chunk 2 (sttCalls becomes 3, NOT 4!), then fails at summary stage
         vm.retryActiveProcessing(null, emptyList(), emptyList())
         waitUntil { vm.processingState.value?.stepIndex == 3 && vm.processingState.value?.error != null }
         assertEquals(3, ai.sttCalls) // Chunk 1 was NOT re-transcribed!
         assertEquals(1, ai.summaryCalls)
+        val retryJob = store.loadJob("uid_chunk_user", meetingId)!!
+        assertEquals(13L, retryJob.chunks[1].segments.single().mulaiDetik)
         assertEquals(3, vm.processingState.value?.stepIndex)
         assertTrue(vm.processingState.value?.canRetryProcessing == true)
 
@@ -339,10 +346,64 @@ class NotulenKuRevisionTest {
         assertEquals(SaveStatus.SAVED, vm.processingState.value?.saveStatus)
         assertEquals(1, ds.saveCalls)
         assertTrue("Original audio must remain on device after save", originalAudio.exists())
-        assertFalse("Temp chunk 1 should be cleaned after save", chunk1File.exists())
-        assertFalse("Temp chunk 2 should be cleaned after save", chunk2File.exists())
+        assertTrue("Successful chunks still follow the 72-hour retention", chunk1File.exists() && chunk2File.exists())
 
         originalAudio.delete()
+    }
+
+    @Test
+    fun chunkCleanupOnlyRemovesExpiredInactiveChunksAndLeavesMeetAlone() {
+        val id = "retention-test"
+        val now = System.currentTimeMillis()
+        val cutoff = now - ProcessingChunkStorage.RETENTION_MS
+        val noMedia = object : android.content.ContextWrapper(context) {
+            override fun getExternalMediaDirs(): Array<File> = emptyArray()
+        }
+        val roots = ProcessingChunkStorage.files(noMedia, id, 0)
+        val expired = roots.first().apply {
+            parentFile!!.mkdirs()
+            writeText("expired")
+            assertTrue(setLastModified(cutoff - 60_000L))
+        }
+        assertEquals(File(context.filesDir, "processing_audio_chunks/$id").canonicalFile, expired.parentFile)
+        val legacy = roots.last().apply {
+            parentFile!!.mkdirs()
+            writeText("legacy")
+            assertTrue(setLastModified(cutoff - 60_000L))
+        }
+        val fresh = ProcessingChunkStorage.files(noMedia, id, 1).first().apply {
+            writeText("fresh")
+            assertTrue(setLastModified(cutoff + 60_000L))
+        }
+        val master = File(context.filesDir, "recordings/masters/Rec-master.m4a").apply {
+            parentFile!!.mkdirs()
+            writeText("master")
+            assertTrue(setLastModified(cutoff - 60_000L))
+        }
+        assertTrue(ProcessingChunkStorage.acquire(id))
+        try {
+            ProcessingChunkStorage.cleanupExpired(noMedia, now)
+            assertTrue(expired.exists() && legacy.exists())
+        } finally {
+            ProcessingChunkStorage.release(id)
+        }
+        ProcessingChunkStorage.cleanupExpired(noMedia, now)
+        assertFalse(expired.exists() || legacy.exists())
+        assertTrue(fresh.exists())
+        assertEquals("master", master.readText())
+    }
+
+    @Test
+    fun sttTimestampNormalizationRejectsEmptyAndMixedTimelineResponses() {
+        val local = TranscriptSegment("Pembicara 1", 2, 8, "Teks")
+        val absolute = local.copy(mulaiDetik = 192, selesaiDetik = 198)
+        assertEquals(listOf(local), AudioSegmenter.relativeChunkTimestamps(listOf(local), 178, 358))
+        assertEquals(14L, AudioSegmenter.relativeChunkTimestamps(listOf(absolute), 178, 358).single().mulaiDetik)
+        assertTrue(runCatching { AudioSegmenter.relativeChunkTimestamps(emptyList(), 178, 358) }.isFailure)
+        assertTrue(runCatching { AudioSegmenter.relativeChunkTimestamps(listOf(local, absolute), 178, 358) }.isFailure)
+        assertTrue(runCatching {
+            AudioSegmenter.relativeChunkTimestamps(listOf(absolute.copy(selesaiDetik = 400)), 178, 358)
+        }.isFailure)
     }
 
     @Test

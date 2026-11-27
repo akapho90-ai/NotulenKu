@@ -405,7 +405,7 @@ class CustomProviderClient {
                 }
                 "google_stt" -> {
                     val b64 = android.util.Base64.encodeToString(audioBytes, android.util.Base64.NO_WRAP)
-                    val promptText = "Transkripsikan rekaman audio dalam bahasa $lang sebagai JSON {\"bahasa\":\"$lang\",\"segmen\":[{\"pembicara\":\"Pembicara 1\",\"mulaiDetik\":0,\"selesaiDetik\":10,\"teks\":\"...\"}]}."
+                    val promptText = "Transkripsikan rekaman audio dalam bahasa $lang. Ukur waktu dalam detik dari awal berkas audio terlampir (detik 0) dan jangan melebihi durasinya. Kembalikan JSON {\"bahasa\":\"$lang\",\"segmen\":[{\"pembicara\":\"Pembicara 1\",\"mulaiDetik\":0,\"selesaiDetik\":10,\"teks\":\"...\"}]}."
                     val body = JSONObject().apply {
                         put("contents", JSONArray().put(JSONObject().apply {
                             put("parts", JSONArray().apply {

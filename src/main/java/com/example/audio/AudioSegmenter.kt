@@ -101,6 +101,32 @@ object AudioSegmenter {
         return merged.sortedBy { it.mulaiDetik }
     }
 
+    internal fun relativeChunkTimestamps(
+        segments: List<TranscriptSegment>,
+        startOffsetSec: Long,
+        endOffsetSec: Long
+    ): List<TranscriptSegment> {
+        require(segments.isNotEmpty()) { "Respons transkripsi tidak memuat ucapan." }
+        require(segments.all { it.teks.isNotBlank() && it.mulaiDetik >= 0 && it.selesaiDetik >= it.mulaiDetik }) {
+            "Segmen transkripsi berisi teks atau stempel waktu yang tidak valid."
+        }
+        require(startOffsetSec in 0L..endOffsetSec)
+        val duration = endOffsetSec - startOffsetSec
+        val tolerance = 2L
+        if (segments.all { it.selesaiDetik <= duration.coerceAtMost(Long.MAX_VALUE - tolerance) + tolerance }) {
+            return segments
+        }
+        val absoluteEnd = endOffsetSec.coerceAtMost(Long.MAX_VALUE - tolerance) + tolerance
+        // Only convert when the relative interpretation failed and every row fits the same
+        // absolute window. In the overlap between the two ranges, keep the specified convention.
+        require(startOffsetSec > 0 && segments.all {
+            it.mulaiDetik >= startOffsetSec && it.selesaiDetik <= absoluteEnd
+        }) { "Stempel waktu transkripsi berada di luar rentang bagian audio." }
+        return segments.map {
+            it.copy(mulaiDetik = it.mulaiDetik - startOffsetSec, selesaiDetik = it.selesaiDetik - startOffsetSec)
+        }
+    }
+
     private val word = Regex("[\\p{L}\\p{M}\\p{N}]+")
 
     private fun normalizeWord(value: String): String =
@@ -143,7 +169,7 @@ object AudioSegmenter {
         if (!sourceFile.isFile || sourceFile.length() <= 0L) {
             return Result.failure(IllegalArgumentException("Berkas audio asli tidak ditemukan atau kosong."))
         }
-        if (!processingSessionId.matches(sessionId)) {
+        if (!ProcessingChunkStorage.isSessionIdValid(sessionId)) {
             return Result.failure(IllegalArgumentException("ID pemrosesan audio tidak valid."))
         }
         if (!hasReadableAudio(sourceFile)) {
@@ -169,12 +195,6 @@ object AudioSegmenter {
             )
         }
 
-        val chunkDir = processingChunkFile(context, sessionId, 0).parentFile ?: return Result.failure(
-            IllegalStateException("Folder segmen audio lokal tidak tersedia.")
-        )
-        if (!chunkDir.isDirectory && !chunkDir.mkdirs()) {
-            return Result.failure(IllegalStateException("Folder segmen audio lokal tidak dapat dibuat."))
-        }
         // Adjust chunk duration downward if bitrate is high so each chunk stays safely under 8 MB
         val bytesPerSec = (sourceFile.length().toDouble() / detectedDurationSec.toDouble()).coerceAtLeast(1000.0)
         val sizeSafeChunkSec = ((MAX_DIRECT_UPLOAD_BYTES * 0.75) / bytesPerSec).toLong()
@@ -183,25 +203,10 @@ object AudioSegmenter {
 
         val chunks = mutableListOf<PreparedAudioChunk>()
         for (window in windows) {
-            val outFile = processingChunkFile(context, sessionId, window.index)
-            if (outFile.canonicalFile == sourceFile.canonicalFile) {
-                return Result.failure(IllegalArgumentException("Lokasi segmen bertabrakan dengan audio asli."))
-            }
-            val extractRes = extractValidM4aSegment(
-                sourceFile = sourceFile,
-                destFile = outFile,
-                startUs = window.startSec * 1_000_000L,
-                endUs = window.endSec * 1_000_000L
-            )
-            if (extractRes.isFailure || !outFile.isFile || outFile.length() !in 1L..MAX_DIRECT_UPLOAD_BYTES) {
-                // Clean partial temp chunks only (NEVER touch sourceFile)
-                chunks.filter { it.isTempChunk }.forEach { runCatching { it.file.delete() } }
-                runCatching { outFile.delete() }
-                return Result.failure(
-                    extractRes.exceptionOrNull()
-                        ?: IllegalStateException("Gagal memecah audio panjang menjadi segmen valid.")
-                )
-            }
+            val cached = ProcessingChunkStorage.files(context, sessionId, window.index)
+                .firstOrNull { ProcessingChunkStorage.isRetained(it) && hasReadableAudio(it) }
+            val outFile = cached ?: writeProcessingChunk(context, sessionId, window, sourceFile)
+                .getOrElse { return Result.failure(it) }
             chunks.add(
                 PreparedAudioChunk(
                     index = window.index,
@@ -218,6 +223,38 @@ object AudioSegmenter {
             return Result.failure(IllegalStateException("Tidak ada segmen audio valid yang dapat diproses."))
         }
         return Result.success(chunks)
+    }
+
+    private fun writeProcessingChunk(
+        context: Context,
+        sessionId: String,
+        window: PlannedAudioWindow,
+        sourceFile: File
+    ): Result<File> {
+        var lastError: Throwable? = null
+        for (dest in ProcessingChunkStorage.files(context, sessionId, window.index, includeLegacy = false)) {
+            val partial = File(dest.parentFile, dest.name + ".part")
+            val result = runCatching {
+                check(dest != sourceFile.canonicalFile &&
+                    partial.canonicalFile == partial && partial != sourceFile.canonicalFile) {
+                    "Lokasi segmen bertabrakan dengan audio asli."
+                }
+                check(dest.parentFile?.let { it.isDirectory || it.mkdirs() } == true) {
+                    "Folder segmen audio lokal tidak dapat dibuat."
+                }
+                extractValidM4aSegment(
+                    sourceFile, partial, window.startSec * 1_000_000L, window.endSec * 1_000_000L
+                ).getOrThrow()
+                check(partial.length() in 1L..MAX_DIRECT_UPLOAD_BYTES && hasReadableAudio(partial)) {
+                    "Segmen audio tidak dapat dibaca atau melebihi batas ukuran."
+                }
+                check(partial.renameTo(dest)) { "Gagal menyimpan segmen audio lokal." }
+                dest
+            }
+            if (result.isSuccess) return result
+            lastError = result.exceptionOrNull()
+        }
+        return Result.failure(lastError ?: IllegalStateException("Folder segmen audio lokal tidak tersedia."))
     }
 
     /**
@@ -408,29 +445,6 @@ object AudioSegmenter {
         }
     }
 
-    private val processingSessionId = Regex("[a-zA-Z0-9_-]{1,128}")
-    private val processingChunkName = Regex("chunk_[0-9]{4,}[.]m4a")
-
-    internal fun processingChunkFile(context: Context, sessionId: String, index: Int): File {
-        require(processingSessionId.matches(sessionId) && index >= 0)
-        val root = File(context.cacheDir, "processing_audio_chunks").canonicalFile
-        val dir = File(root, sessionId)
-        check(dir.canonicalFile == dir) { "Folder segmen audio tidak valid." }
-        return File(dir, "chunk_${index.toString().padStart(4, '0')}.m4a").also {
-            check(it.canonicalFile == it) { "Lokasi segmen audio tidak valid." }
-        }
-    }
-
-    fun cleanupTempChunkDir(context: Context, sessionId: String, originalAudioPath: String?) {
-        runCatching {
-            val dir = processingChunkFile(context, sessionId, 0).parentFile ?: return
-            val original = originalAudioPath?.takeIf { it.isNotBlank() }?.let { File(it).canonicalFile }
-            dir.listFiles().orEmpty().filter {
-                it.isFile && processingChunkName.matches(it.name) && it.canonicalFile == it && it != original
-            }.forEach { it.delete() }
-            dir.delete() // Succeeds only when empty.
-        }
-    }
 
     private fun findAudioTrackIndex(extractor: MediaExtractor): Int {
         for (i in 0 until extractor.trackCount) {

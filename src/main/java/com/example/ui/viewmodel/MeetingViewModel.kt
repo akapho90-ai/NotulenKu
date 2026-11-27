@@ -5,6 +5,7 @@ import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.audio.AudioSegmenter
+import com.example.audio.ProcessingChunkStorage
 import com.example.audio.PreparedAudioChunk
 import com.example.core.AppConstants
 import com.example.core.toFriendlyIndonesianError
@@ -137,6 +138,9 @@ class MeetingViewModel(
     private var activeDetailMeetingId: String? = null
 
     init {
+        appContext?.let { context ->
+            viewModelScope.launch(processingIoDispatcher) { ProcessingChunkStorage.cleanupExpired(context) }
+        }
         refreshPendingLocalJobs()
         if (autoLoadOnInit && currentUserId.isNotBlank()) {
             refreshMeetings()
@@ -422,8 +426,25 @@ class MeetingViewModel(
         taskConfigs: List<com.example.data.model.TaskConfig>,
         prices: List<ModelPrice>
     ) {
-        var currentJob = job
         if (job.ownerUserId != currentUserId || currentUserId.isBlank()) return
+        if (!ProcessingChunkStorage.acquire(job.meetingId)) return
+        try {
+            runResumableJob(job, tenant, taskConfigs, prices)
+        } finally {
+            ProcessingChunkStorage.release(job.meetingId)
+            appContext?.let { context ->
+                viewModelScope.launch(processingIoDispatcher) { ProcessingChunkStorage.cleanupExpired(context) }
+            }
+        }
+    }
+
+    private suspend fun runResumableJob(
+        job: LocalProcessingJob,
+        tenant: Tenant?,
+        taskConfigs: List<com.example.data.model.TaskConfig>,
+        prices: List<ModelPrice>
+    ) {
+        var currentJob = job
         pendingSave = null
         _processingState.value = ProcessingStepState(
             meetingId = job.meetingId,
@@ -459,15 +480,18 @@ class MeetingViewModel(
                 return
             }
 
-            // Prepare chunks if not yet created OR if temp chunk files were purged by OS cache cleaner
-            val needPrepareChunks = currentJob.chunks.isEmpty() || currentJob.chunks.any {
-                it.status != ChunkStatus.DONE && runCatching {
-                    val file = File(it.filePath)
-                    val expected = if (it.isTempChunk && appContext != null) {
-                        AudioSegmenter.processingChunkFile(appContext, job.meetingId, it.index)
-                    } else originalFile.canonicalFile
-                    !file.isFile || file.length() == 0L || file.canonicalFile != expected
-                }.getOrDefault(true)
+            val needPrepareChunks = withContext(processingIoDispatcher) {
+                currentJob.chunks.isEmpty() || currentJob.chunks.any {
+                    it.status != ChunkStatus.DONE && runCatching {
+                        val file = File(it.filePath).canonicalFile
+                        if (it.isTempChunk && appContext != null) {
+                            file !in ProcessingChunkStorage.files(appContext, job.meetingId, it.index) ||
+                                !ProcessingChunkStorage.isRetained(file)
+                        } else {
+                            !file.isFile || file.length() == 0L || file != originalFile.canonicalFile
+                        }
+                    }.getOrDefault(true)
+                }
             }
             if (needPrepareChunks) {
                 _processingState.value = ProcessingStepState(
@@ -510,13 +534,11 @@ class MeetingViewModel(
                     )
                 }
 
-                // Preserve already-DONE chunks when re-preparing after OS cache cleanup
-                val oldDoneByIndex = currentJob.chunks
-                    .filter { it.status == ChunkStatus.DONE }
-                    .associateBy { it.index }
+                // Keep completed transcripts and failure state when rebuilding expired or missing audio.
+                val oldChunksByIndex = currentJob.chunks.associateBy { it.index }
 
                 val mergedChunks = preparedChunks.map { p ->
-                    val prev = oldDoneByIndex[p.index]
+                    val prev = oldChunksByIndex[p.index]
                     if (prev != null && prev.startOffsetSec == p.startOffsetSec && prev.endOffsetSec == p.endOffsetSec &&
                         prev.mimeType == p.mimeType) {
                         prev.copy(filePath = p.file.absolutePath, isTempChunk = p.isTempChunk)
@@ -565,13 +587,13 @@ class MeetingViewModel(
                 val chunkFile = File(chunk.filePath)
                 val bytes = withContext(processingIoDispatcher) {
                     runCatching {
-                        val expected = if (chunk.isTempChunk && appContext != null) {
-                            AudioSegmenter.processingChunkFile(appContext, currentJob.meetingId, chunk.index)
-                        } else originalFile
-                        val length = chunkFile.length()
-                        if (chunkFile.canonicalFile != expected.canonicalFile ||
-                            length !in 1L..AudioSegmenter.MAX_DIRECT_UPLOAD_BYTES) return@runCatching null
-                        java.io.DataInputStream(chunkFile.inputStream()).use { input ->
+                        val canonical = chunkFile.canonicalFile
+                        val managed = if (chunk.isTempChunk && appContext != null) {
+                            canonical in ProcessingChunkStorage.files(appContext, currentJob.meetingId, chunk.index)
+                        } else canonical == originalFile.canonicalFile
+                        val length = canonical.length()
+                        if (!managed || length !in 1L..AudioSegmenter.MAX_DIRECT_UPLOAD_BYTES) return@runCatching null
+                        java.io.DataInputStream(canonical.inputStream()).use { input ->
                             val bytes = ByteArray(length.toInt())
                             input.readFully(bytes)
                             bytes.takeIf { input.read() == -1 }
@@ -604,12 +626,9 @@ class MeetingViewModel(
                 )
 
                 val trans = sttResult.mapCatching { result ->
-                    val maxEnd = (chunk.endOffsetSec - chunk.startOffsetSec).coerceAtMost(Long.MAX_VALUE - 2) + 2
-                    require(result.segments.isNotEmpty() && result.segments.all {
-                        it.teks.isNotBlank() && it.mulaiDetik >= 0 &&
-                            it.selesaiDetik in it.mulaiDetik..maxEnd
-                    }) { "Respons transkripsi kosong atau stempel waktu segmen tidak valid." }
-                    result
+                    result.copy(segments = AudioSegmenter.relativeChunkTimestamps(
+                        result.segments, chunk.startOffsetSec, chunk.endOffsetSec
+                    ))
                 }.getOrElse { err ->
                     if (err is CancellationException) throw err
                     val errMsg = toFriendlyIndonesianError(err)
@@ -1396,13 +1415,9 @@ class MeetingViewModel(
     }
 
     private fun removeLocalJob(meetingId: String): Boolean {
-        val existing = checkpointStore?.loadJob(currentUserId, meetingId)
         if (checkpointStore?.removeJob(currentUserId, meetingId) == false) {
             _uiMessage.value = "Checkpoint lokal belum dapat dibersihkan."
             return false
-        }
-        if (appContext != null && existing != null) {
-            AudioSegmenter.cleanupTempChunkDir(appContext, meetingId, existing.originalAudioPath)
         }
         return true
     }

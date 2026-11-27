@@ -24,9 +24,12 @@ object RecordingFileIdentity {
         return Identity(global, date, daily, fileName)
     }
     @Suppress("DEPRECATION") // Use Android's app-owned, user-visible media directory.
+    internal fun mediaFolder(context: Context, name: String): File? =
+        runCatching { context.externalMediaDirs.firstOrNull() }.getOrNull()
+            ?.let { File(it, "NotulenKu/$name") }
+
     internal fun saveMaster(context: Context, segments: List<File>, fileName: String): Result<File> {
-        val media = runCatching { context.externalMediaDirs.firstOrNull() }.getOrNull()
-            ?.let { File(it, "NotulenKu/Meet") }
+        val media = mediaFolder(context, "Meet")
         val privateDir = File(context.filesDir, "recordings/masters")
         var lastError: Throwable? = null
         for (dir in listOfNotNull(media, privateDir)) {
