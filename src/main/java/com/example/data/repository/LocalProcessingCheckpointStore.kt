@@ -168,6 +168,22 @@ class LocalProcessingCheckpointStore(private val baseDir: File) {
             ?: readValidated(File(file.parentFile, "${file.name}.bak"), ownerUserId, meetingId)
     }
 
+    internal fun chunkSessionsWithoutReadableMaster(): Set<String> = synchronized(lock) {
+        baseDir.listFiles().orEmpty().asSequence()
+            .filter { it.isDirectory && validId.matches(it.name) }
+            .flatMap { listJobs(it.name).asSequence() }
+            .filter { job ->
+                if (job.transcriptDone || job.chunks.none { it.isTempChunk && it.status != ChunkStatus.DONE }) {
+                    return@filter false
+                }
+                val master = File(job.originalAudioPath)
+                !master.isFile || !master.canRead() || master.length() == 0L ||
+                    (job.ukuranBytes > 0L && master.length() != job.ukuranBytes)
+            }
+            .map { it.meetingId }
+            .toSet()
+    }
+
     fun listJobs(ownerUserId: String): List<LocalProcessingJob> = synchronized(lock) {
         if (!validId.matches(ownerUserId)) return emptyList()
         userDir(ownerUserId).listFiles().orEmpty().asSequence()

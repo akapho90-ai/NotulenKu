@@ -140,7 +140,7 @@ class MeetingViewModel(
 
     init {
         appContext?.let { context ->
-            viewModelScope.launch(processingIoDispatcher) { ProcessingChunkStorage.cleanupExpired(context) }
+            viewModelScope.launch(processingIoDispatcher) { cleanupExpiredProcessingChunks(context) }
         }
         refreshPendingLocalJobs()
         if (autoLoadOnInit && currentUserId.isNotBlank()) {
@@ -434,9 +434,14 @@ class MeetingViewModel(
         } finally {
             ProcessingChunkStorage.release(job.meetingId)
             appContext?.let { context ->
-                viewModelScope.launch(processingIoDispatcher) { ProcessingChunkStorage.cleanupExpired(context) }
+                viewModelScope.launch(processingIoDispatcher) { cleanupExpiredProcessingChunks(context) }
             }
         }
+    }
+
+    private fun cleanupExpiredProcessingChunks(context: Context) {
+        val recoverable = checkpointStore?.chunkSessionsWithoutReadableMaster().orEmpty()
+        ProcessingChunkStorage.cleanupExpired(context, recoverySessions = recoverable)
     }
 
     private suspend fun runResumableJob(

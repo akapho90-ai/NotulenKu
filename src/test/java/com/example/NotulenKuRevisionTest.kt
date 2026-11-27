@@ -397,6 +397,25 @@ class NotulenKuRevisionTest {
         assertFalse(expired.exists() || legacy.exists())
         assertTrue(fresh.exists())
         assertEquals("master", master.readText())
+
+        val store = LocalProcessingCheckpointStore(context)
+        val recoveryId = "retention-recovery-test"
+        val recoveryChunk = ProcessingChunkStorage.files(noMedia, recoveryId, 0).first().apply {
+            parentFile!!.mkdirs()
+            writeText("recovery")
+            assertTrue(setLastModified(cutoff - 60_000L))
+        }
+        val unavailableMaster = File(master.parentFile, "unavailable.m4a")
+        val job = LocalProcessingJob(
+            recoveryId, "other-account", "Rapat", unavailableMaster.absolutePath, "audio/mp4", 180, 6,
+            chunks = listOf(AudioChunkCheckpoint(0, 0, 180, recoveryChunk.absolutePath, "audio/mp4", true, ChunkStatus.FAILED))
+        )
+        assertTrue(store.saveJob(job))
+        ProcessingChunkStorage.cleanupExpired(noMedia, now, store.chunkSessionsWithoutReadableMaster())
+        assertTrue(recoveryChunk.exists())
+        unavailableMaster.writeText("master")
+        ProcessingChunkStorage.cleanupExpired(noMedia, now, store.chunkSessionsWithoutReadableMaster())
+        assertFalse(recoveryChunk.exists())
     }
 
     @Test

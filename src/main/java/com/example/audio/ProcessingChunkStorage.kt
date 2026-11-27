@@ -31,11 +31,15 @@ internal object ProcessingChunkStorage {
             file.lastModified() > now - RETENTION_MS
 
     @Synchronized
-    fun cleanupExpired(context: Context, now: Long = System.currentTimeMillis()) {
+    fun cleanupExpired(
+        context: Context,
+        now: Long = System.currentTimeMillis(),
+        recoverySessions: Set<String> = emptySet()
+    ) {
         val cutoff = now - RETENTION_MS
         for (root in roots(context, includeLegacy = true)) {
             for (entry in root.listFiles().orEmpty()) {
-                if (!isSessionIdValid(entry.name) || entry.name in activeSessions) continue
+                if (!isSessionIdValid(entry.name) || entry.name in activeSessions || entry.name in recoverySessions) continue
                 val dir = child(root, entry.name)?.takeIf { it.isDirectory } ?: continue
                 for (entryFile in dir.listFiles().orEmpty()) {
                     if (!chunkName.matches(entryFile.name)) continue
